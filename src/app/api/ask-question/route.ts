@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import OpenAI from 'openai';
 import { getAuthServerSession } from '@/lib/auth';
 import { getUserIndex } from '@/lib/pinecone';
+import { queryAllIndices } from '@/lib/shared-pinecone';
 
 // Initialize OpenAI
 const openai = new OpenAI({
@@ -50,23 +51,19 @@ export async function POST(request: Request) {
       const queryEmbedding = embeddingResponse.data[0].embedding;
       console.log(`[DEBUG] Generated embedding for question`);
 
-      // Query Pinecone for relevant content
-      const index = await getUserIndex(formattedUsername);
-      const queryResults = await index.namespace('ns1').query({
-        topK: 5,
-        vector: queryEmbedding,
-        includeMetadata: true,
-      });
-
-      console.log(`[DEBUG] Retrieved ${queryResults.matches?.length || 0} matches from Pinecone`);
+      // Query across all indices using the shared index
+      const queryResults = await queryAllIndices(queryEmbedding, 5);
+      
+      console.log(`[DEBUG] Retrieved ${queryResults.matches?.length || 0} matches from shared index`);
       
       // Log match scores to debug retrieval quality
       if (queryResults.matches && queryResults.matches.length > 0) {
         queryResults.matches.forEach((match, i) => {
-          console.log(`[DEBUG] Match ${i+1} score: ${match.score}, has metadata: ${!!match.metadata}`);
+          const userId = match.metadata?.userId || 'unknown';
+          console.log(`[DEBUG] Match ${i+1} score: ${match.score}, has metadata: ${!!match.metadata}, from user: ${userId}`);
         });
       } else {
-        console.log(`[DEBUG] No matches found in Pinecone index ${formattedUsername}`);
+        console.log(`[DEBUG] No matches found in shared index`);
       }
 
       // Extract content from matches
@@ -98,7 +95,8 @@ export async function POST(request: Request) {
             
             If the answer is clearly contained in the context, provide it directly and confidently.
             If the answer is partially contained, provide what you can determine from the context.
-            If the question cannot be answered from the context, politely explain that you don't have enough information, and refer them to use Slack or contact the Product Manager for the relevant team at Klaviyo.
+            Remember that users can phrase things differently, and imply things. Be flexible in interpreting their question and finding the relevant answers. For exmaple, "How do I get access" often implies "How can I get beta access". Be flexible on wording and matching it to available information in your context. 
+            If the question cannot be answered from the context, politely explain that you don't have enough information, tell them "Hansen didn't make me smart enough.", and refer them to use Slack or contact the Product Manager for the relevant team at Klaviyo.
             
             Never make up information that isn't supported by the context.
             Never mention the existence of the context in your response - just answer naturally.

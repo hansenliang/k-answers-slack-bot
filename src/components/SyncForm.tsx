@@ -167,14 +167,15 @@ export default function SyncForm({ onSyncComplete }: SyncFormProps) {
         const storedPrds = localStorage.getItem('prds');
         const prds = storedPrds ? JSON.parse(storedPrds) : [];
 
-        // Generate a unique sync ID for this operation
-        const syncId = `sync_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
+        // Generate a stable syncId based on document ID rather than random + timestamp
+        // This ensures the same document always has a consistent identifier
+        const syncId = `gdoc_${documentId}`;
 
         // Check if document with same ID already exists
         const existingDocIndex = prds.findIndex((existingDoc: any) => existingDoc.id === documentId);
 
         if (existingDocIndex >= 0) {
-          // Update the existing document with new metadata and syncId
+          // Update the existing document with new metadata but keep the same consistent syncId
           prds[existingDocIndex] = {
             ...prds[existingDocIndex],
             title: data.documentName,
@@ -323,14 +324,15 @@ export default function SyncForm({ onSyncComplete }: SyncFormProps) {
             const storedPrds = localStorage.getItem('prds');
             const prds = storedPrds ? JSON.parse(storedPrds) : [];
 
-            // Generate a unique sync ID for this operation
-            const syncId = `sync_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
+            // Generate a stable syncId based on document ID rather than random + timestamp
+            // This ensures the same document always has a consistent identifier
+            const syncId = `gdoc_${doc.id}`;
 
             // Check if document with same ID already exists
             const existingDocIndex = prds.findIndex((existingDoc: any) => existingDoc.id === doc.id);
 
             if (existingDocIndex >= 0) {
-              // Update the existing document with new metadata and syncId
+              // Update the existing document with new metadata but keep the same consistent syncId
               prds[existingDocIndex] = {
                 ...prds[existingDocIndex],
                 title: data.documentName,

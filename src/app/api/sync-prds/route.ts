@@ -5,6 +5,7 @@ import { getAuthServerSession } from '@/lib/auth';
 import { chunkTextByMultiParagraphs } from '@/app/chunk';
 import { buildPineconeRecords } from '@/app/embed';
 import { getUserIndex } from '@/lib/pinecone';
+import { getSharedIndex } from '@/lib/shared-pinecone';
 
 interface DocumentContent {
   name: string;
@@ -345,6 +346,28 @@ export async function POST(request: Request) {
           try {
             await index.namespace(namespaceName).upsert(embeddingsWithDocId);
             console.log(`[DEBUG] Successfully stored embeddings in Pinecone`);
+            
+            // Also store in the shared index for cross-user search
+            try {
+              // Get the shared index
+              const sharedIndex = await getSharedIndex();
+              
+              // Add userId to each vector's metadata to track ownership
+              const embeddingsWithUserInfo = embeddingsWithDocId.map(item => ({
+                ...item,
+                metadata: {
+                  ...item.metadata,
+                  userId: formattedUsername, // Add the user ID to track who owns this document
+                }
+              }));
+              
+              // Upsert to the shared index
+              await sharedIndex.namespace('ns1').upsert(embeddingsWithUserInfo);
+              console.log(`[DEBUG] Successfully stored embeddings in shared index`);
+            } catch (sharedIndexError) {
+              console.error('[ERROR] Failed to store embeddings in shared index:', sharedIndexError);
+              // Continue even if shared index fails - user's index was already updated
+            }
           } catch (pineconeError) {
             console.error('[ERROR] Failed to upsert embeddings to Pinecone:', pineconeError);
             

@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { getAuthServerSession } from '@/lib/auth';
 import { getUserIndex } from '@/lib/pinecone';
+import { getSharedIndex } from '@/lib/shared-pinecone';
 
 // Interface for the document data stored in localStorage
 interface StoredDocument {
@@ -84,11 +85,25 @@ export async function GET() {
         name: doc.title || 'Untitled Document',
         syncedAt: new Date(doc.createdAt || Date.now()),
         url: doc.url,
-        syncId: doc.syncId || `legacy_${Math.random().toString(36).substring(2)}` // Generate a syncId for legacy entries
+        syncId: doc.syncId || `legacy_${doc.id}` // Generate a stable syncId for legacy entries
       }));
       
+      // Deduplicate documents by ID before returning them
+      // This ensures we only show one entry per document, keeping the most recent one
+      const documentMap = new Map<string, SyncedDocument>();
+      for (const doc of documents) {
+        // Only add or replace if the document is more recent
+        const existingDoc = documentMap.get(doc.id);
+        if (!existingDoc || new Date(doc.syncedAt) > new Date(existingDoc.syncedAt)) {
+          documentMap.set(doc.id, doc);
+        }
+      }
+      
+      // Convert map back to array
+      const deduplicatedDocuments = Array.from(documentMap.values());
+      
       return NextResponse.json({ 
-        documents,
+        documents: deduplicatedDocuments,
         stats: {
           recordCount: stats.totalRecordCount || 0,
           namespaces: Object.keys(stats.namespaces || {})
@@ -127,26 +142,26 @@ export async function POST(request: Request) {
       // Make sure all documents have a syncId
       const processedDocuments = documents.map(doc => {
         if (!doc.syncId) {
-          // Create a syncId for legacy documents
-          const syncId = `legacy_${doc.id}_${Math.random().toString(36).substring(2, 9)}`;
+          // Create a stable syncId for legacy documents based on document ID
+          const syncId = `legacy_${doc.id}`;
           console.log(`Adding syncId ${syncId} to legacy document: ${doc.title}`);
           return { ...doc, syncId };
         }
         return doc;
       });
 
-      // Instead of replacing storedDocuments, merge the new documents
-      // This prevents reintroducing deleted documents
-      const existingSyncIds = new Set(storedDocuments.map(doc => doc.syncId));
+      // Deduplicate documents by their ID, not their syncId
+      // This ensures we don't have multiple entries for the same Google Doc
+      const existingDocIds = new Set(storedDocuments.map(doc => doc.id));
       
-      // Only add documents that don't already exist in the stored documents
-      const newDocuments = processedDocuments.filter(doc => !existingSyncIds.has(doc.syncId));
+      // Only add documents that don't already exist in the stored documents by ID
+      const newDocuments = processedDocuments.filter(doc => !existingDocIds.has(doc.id));
       
       if (newDocuments.length > 0) {
         storedDocuments = [...storedDocuments, ...newDocuments];
         console.log(`Added ${newDocuments.length} new documents from client`);
         
-        // Log the first few document IDs and syncIds for debugging
+        // Log the first few document IDs for debugging
         if (newDocuments.length > 0) {
           const sampleDocs = newDocuments.slice(0, Math.min(3, newDocuments.length));
           console.log('Sample new documents:');
@@ -243,6 +258,35 @@ export async function DELETE(request: Request) {
           }
         } else {
           console.log(`[DEBUG] No vectors found for document ${documentId} in Pinecone`);
+        }
+        
+        // Also delete from shared index
+        try {
+          const sharedIndex = await getSharedIndex();
+          console.log(`[DEBUG] Checking for vectors in shared index for document ${documentId}`);
+          
+          const sharedResponse = await sharedIndex.namespace(namespaceName).query({
+            vector: sampleVector,
+            topK: 50, // Get more matches to ensure we find all vectors
+            filter: filter,
+            includeMetadata: true,
+          });
+          
+          if (sharedResponse.matches && sharedResponse.matches.length > 0) {
+            const sharedIdsToDelete = sharedResponse.matches.map(match => match.id);
+            
+            console.log(`[DEBUG] Found ${sharedIdsToDelete.length} vectors to delete from shared index for document ${documentId}`);
+            
+            if (sharedIdsToDelete.length > 0) {
+              await sharedIndex.namespace(namespaceName).deleteMany(sharedIdsToDelete);
+              console.log(`[DEBUG] Successfully deleted ${sharedIdsToDelete.length} vectors from shared index`);
+            }
+          } else {
+            console.log(`[DEBUG] No vectors found for document ${documentId} in shared index`);
+          }
+        } catch (sharedError) {
+          console.error(`[ERROR] Failed to delete vectors from shared index:`, sharedError);
+          // Continue even if shared index deletion fails
         }
       } catch (pineconeError) {
         console.error(`[ERROR] Failed to delete vectors from Pinecone:`, pineconeError);

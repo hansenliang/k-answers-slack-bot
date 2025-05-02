@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { getAuthServerSession } from '@/lib/auth';
 import { getUserIndex } from '@/lib/pinecone';
+import { getSharedIndex } from '@/lib/shared-pinecone';
 
 // Interface for delete request
 interface DeleteDocumentRequest {
@@ -92,13 +93,40 @@ export async function POST(request: Request) {
           } else {
             console.log(`[DEBUG] No vectors found for document ${documentId} in Pinecone`);
           }
+          
+          // Also delete from shared index
+          try {
+            const sharedIndex = await getSharedIndex();
+            console.log(`[DEBUG] Checking for vectors in shared index for document ${documentId}`);
+            
+            const sharedResponse = await sharedIndex.namespace(namespaceName).query({
+              vector: sampleVector,
+              topK: 50, // Get more matches to ensure we find all vectors
+              filter: filter,
+              includeMetadata: true,
+            });
+            
+            if (sharedResponse.matches && sharedResponse.matches.length > 0) {
+              const sharedIdsToDelete = sharedResponse.matches.map(match => match.id);
+              
+              console.log(`[DEBUG] Found ${sharedIdsToDelete.length} vectors to delete from shared index for document ${documentId}`);
+              
+              if (sharedIdsToDelete.length > 0) {
+                await sharedIndex.namespace(namespaceName).deleteMany(sharedIdsToDelete);
+                console.log(`[DEBUG] Successfully deleted ${sharedIdsToDelete.length} vectors from shared index`);
+              }
+            } else {
+              console.log(`[DEBUG] No vectors found for document ${documentId} in shared index`);
+            }
+          } catch (sharedError) {
+            console.error(`[ERROR] Failed to delete vectors from shared index:`, sharedError);
+            // Continue even if shared index deletion fails
+          }
         } catch (queryError) {
-          console.error(`[ERROR] Error querying Pinecone:`, queryError);
-          // Continue even if query fails
+          console.error('[ERROR] Failed to query Pinecone for vectors to delete:', queryError);
         }
       } catch (pineconeError) {
-        console.error(`[ERROR] Failed to delete vectors from Pinecone:`, pineconeError);
-        // We'll continue even if Pinecone deletion fails, so the UI can be updated
+        console.error('[ERROR] Failed to access Pinecone for deletion:', pineconeError);
       }
       
       return NextResponse.json({ 

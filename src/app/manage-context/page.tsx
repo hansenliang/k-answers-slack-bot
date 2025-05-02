@@ -183,7 +183,13 @@ export default function ManageContextPage() {
             </div>
           ) : syncedDocs.length > 0 ? (
             <div className="space-y-2">
-              {syncedDocs.map((doc) => (
+              {/* Deduplicate documents by ID */}
+              {syncedDocs
+                // Filter to get unique documents by ID (keeping only the most recent entry)
+                .filter((doc, index, self) => 
+                  index === self.findIndex((d) => d.id === doc.id)
+                )
+                .map((doc) => (
                 <div key={doc.syncId} className="border border-zinc-800 rounded-md p-4">
                   <div className="flex justify-between items-start">
                     <div>
