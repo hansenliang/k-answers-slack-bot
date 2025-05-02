@@ -127,11 +127,16 @@ app.event('app_mention', async ({ event, say, client }: {
 });
 
 // Handle direct messages
-app.event('message.im', async ({ event, say }: { 
+app.event('message', async ({ event, say }: { 
   event: MessageEvent, 
   say: SayFn 
 }) => {
   try {
+    // Only process direct messages (channel_type === 'im')
+    if (event.channel_type !== 'im') {
+      return;
+    }
+    
     // Skip if the message is from a bot (loop prevention)
     if (event.bot_id || event.subtype === 'bot_message') {
       console.log('[DEBUG] Ignoring DM from a bot');
@@ -171,7 +176,7 @@ app.event('message.im', async ({ event, say }: {
 
     console.log(`[DEBUG] Sent response to user ${userId} in DM`);
   } catch (error) {
-    console.error('[ERROR] Error handling message.im event:', error);
+    console.error('[ERROR] Error handling message event:', error);
     await say("I encountered an error while processing your question. Please try again later.");
   }
 });

@@ -26,7 +26,7 @@ The application includes a Slack bot that monitors public channels and direct me
 1. Create a Slack app in the [Slack API Console](https://api.slack.com/apps)
 2. Enable the Events API and subscribe to the following events:
    - `app_mention` (for public channel mentions)
-   - `message.im` (for direct messages)
+   - `message` (for direct messages)
 3. Add the following scopes:
    - `app_mentions:read`
    - `chat:write`
