@@ -56,18 +56,26 @@ export async function GET() {
       // Get stats to check if documents exist
       const stats = await index.describeIndexStats();
       
-      // We're reading the document data from our in-memory store
-      // In a real implementation, this would come from a database
-      const serverData = {
-        documents: storedDocuments.length > 0 ? storedDocuments : [
-          {
+      // Only add the placeholder document if:
+      // 1. There are no documents in memory storage AND
+      // 2. The Pinecone index has no vectors (meaning no actual documents have been synced)
+      let serverData;
+      if (storedDocuments.length === 0 && (!stats.totalRecordCount || stats.totalRecordCount === 0)) {
+        serverData = {
+          documents: [{
             id: 'sample1',
             title: 'Sample Document (Add real documents by syncing)',
             url: 'https://docs.google.com/document/',
-            createdAt: new Date().toISOString()
-          }
-        ]
-      };
+            createdAt: new Date().toISOString(),
+            syncId: 'sample1'
+          }]
+        };
+      } else {
+        // Otherwise, just use the stored documents without placeholder
+        serverData = {
+          documents: storedDocuments
+        };
+      }
       
       if (!serverData || !serverData.documents || serverData.documents.length === 0) {
         return NextResponse.json({ 

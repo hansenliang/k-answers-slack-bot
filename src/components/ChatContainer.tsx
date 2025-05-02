@@ -4,12 +4,14 @@ import React, { useState, useRef, useEffect } from 'react';
 import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
 import { useRouter } from 'next/navigation';
+import AnimatedResponse from '@/components/streaming/AnimatedResponse';
 
 interface Message {
   id: string;
   content: string;
   role: 'user' | 'assistant';
   timestamp: Date;
+  isComplete?: boolean; // Add isComplete flag for streaming responses
 }
 
 export default function ChatContainer() {
@@ -17,6 +19,7 @@ export default function ChatContainer() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState('');
   const [isProcessing, setIsProcessing] = useState(false);
+  const [isWaitingForFirstChunk, setIsWaitingForFirstChunk] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
 
@@ -42,48 +45,115 @@ export default function ChatContainer() {
       content: input.trim(),
       role: 'user',
       timestamp: new Date(),
+      isComplete: true
     };
 
     setMessages(prev => [...prev, userMessage]);
     setInput('');
     setIsProcessing(true);
+    setIsWaitingForFirstChunk(true);
+
+    // Create a response ID but don't add the message yet
+    const responseId = `response-${Date.now()}`;
 
     try {
-      const response = await fetch('/api/ask-question', {
+      // Call streaming API
+      const response = await fetch('/api/ask-question-stream', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+        },
         body: JSON.stringify({ question: userMessage.content }),
       });
 
-      const data = await response.json();
-
       if (!response.ok) {
-        throw new Error(data.error || `Error: ${response.status}`);
+        throw new Error(`Error: ${response.status}`);
       }
 
-      setMessages(prev => [
-        ...prev,
-        {
-          id: Date.now().toString(),
-          content: data.answer,
-          role: 'assistant',
-          timestamp: new Date(),
-        },
-      ]);
+      // Process the streaming response
+      const reader = response.body?.getReader();
+      const decoder = new TextDecoder();
+      
+      if (reader) {
+        let accumulatedContent = '';
+        let messageAdded = false;
+        
+        while (true) {
+          const { done, value } = await reader.read();
+          
+          if (done) break;
+          
+          // Decode and accumulate the chunk
+          const chunk = decoder.decode(value, { stream: true });
+          accumulatedContent += chunk;
+          
+          // If this is the first chunk, add the assistant message
+          if (!messageAdded && accumulatedContent.trim()) {
+            setIsWaitingForFirstChunk(false);
+            setMessages(prev => [
+              ...prev,
+              {
+                id: responseId,
+                content: accumulatedContent,
+                role: 'assistant',
+                timestamp: new Date(),
+                isComplete: false
+              }
+            ]);
+            messageAdded = true;
+          } else if (messageAdded) {
+            // Update the message content as chunks arrive
+            setMessages(prev => 
+              prev.map(msg => 
+                msg.id === responseId 
+                  ? { ...msg, content: accumulatedContent } 
+                  : msg
+              )
+            );
+          }
+        }
+        
+        // If no message was ever added (rare case), add it now
+        if (!messageAdded) {
+          setMessages(prev => [
+            ...prev,
+            {
+              id: responseId,
+              content: accumulatedContent || "I don't have an answer for that.",
+              role: 'assistant',
+              timestamp: new Date(),
+              isComplete: true
+            }
+          ]);
+        } else {
+          // Mark the message as complete
+          setMessages(prev => 
+            prev.map(msg => 
+              msg.id === responseId 
+                ? { ...msg, isComplete: true } 
+                : msg
+            )
+          );
+        }
+      }
     } catch (error) {
+      setIsWaitingForFirstChunk(false);
       console.error('Error asking question:', error);
+      // Add error message
       setMessages(prev => [
         ...prev,
         {
-          id: Date.now().toString(),
+          id: responseId,
           content: error instanceof Error 
             ? `Error: ${error.message}` 
             : "I'm sorry, I couldn't process your question. Please try again.",
           role: 'assistant',
           timestamp: new Date(),
-        },
+          isComplete: true
+        }
       ]);
     } finally {
+      setIsWaitingForFirstChunk(false);
       setIsProcessing(false);
       // Re-focus the input after processing
       if (inputRef.current) {
@@ -144,16 +214,30 @@ export default function ChatContainer() {
                       : 'bg-zinc-900'
                   }`}
                 >
-                  <div className="whitespace-pre-wrap text-[1rem]">{message.content}</div>
-                  <div className="mt-1 text-xs text-zinc-500">
-                    {formatTime(message.timestamp)}
-                  </div>
+                  {message.role === 'assistant' ? (
+                    <>
+                      <AnimatedResponse 
+                        text={message.content} 
+                        isComplete={message.isComplete || false}
+                        className="text-[1rem] whitespace-pre-wrap"
+                        timestamp={message.timestamp}
+                        showTimestamp={!!message.content}
+                      />
+                    </>
+                  ) : (
+                    <>
+                      <div className="whitespace-pre-wrap text-[1rem]">{message.content}</div>
+                      <div className="mt-1 text-xs text-zinc-500">
+                        {formatTime(message.timestamp)}
+                      </div>
+                    </>
+                  )}
                 </div>
               </div>
             ))}
 
-            {/* Typing indicator */}
-            {isProcessing && (
+            {/* Typing indicator - only show when waiting for first chunk */}
+            {isWaitingForFirstChunk && (
               <div className="flex justify-start animate-fade-in">
                 <div className="max-w-[80%] rounded-[12px] bg-zinc-900 px-4 py-3">
                   <div className="flex items-center space-x-1">

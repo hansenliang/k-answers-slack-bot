@@ -34,13 +34,38 @@ export default function ManageContextPage() {
       const response = await fetch('/api/synced-documents');
       if (response.ok) {
         const data = await response.json();
-        setSyncedDocs(data.documents || []);
+        
+        // Ensure we have the correct data structure
+        const documents = data.documents || [];
+        
+        // Apply client-side deduplication by ID to ensure unique documents in UI
+        const uniqueDocs = deduplicate(documents);
+        
+        setSyncedDocs(uniqueDocs);
       }
     } catch (error) {
       console.error('Error fetching documents:', error);
     } finally {
       setIsLoading(false);
     }
+  };
+
+  // Helper function to deduplicate documents by ID
+  const deduplicate = (documents: SyncedDocument[]) => {
+    // Create a map to store documents by ID, keeping only the most recent
+    const documentMap = new Map<string, SyncedDocument>();
+    
+    for (const doc of documents) {
+      const existingDoc = documentMap.get(doc.id);
+      
+      // Only replace if the doc is more recent or doesn't exist
+      if (!existingDoc || new Date(doc.syncedAt) > new Date(existingDoc.syncedAt)) {
+        documentMap.set(doc.id, doc);
+      }
+    }
+    
+    // Convert back to array
+    return Array.from(documentMap.values());
   };
 
   // Send local storage PRD data to the server
@@ -183,13 +208,7 @@ export default function ManageContextPage() {
             </div>
           ) : syncedDocs.length > 0 ? (
             <div className="space-y-2">
-              {/* Deduplicate documents by ID */}
-              {syncedDocs
-                // Filter to get unique documents by ID (keeping only the most recent entry)
-                .filter((doc, index, self) => 
-                  index === self.findIndex((d) => d.id === doc.id)
-                )
-                .map((doc) => (
+              {syncedDocs.map((doc) => (
                 <div key={doc.syncId} className="border border-zinc-800 rounded-md p-4">
                   <div className="flex justify-between items-start">
                     <div>

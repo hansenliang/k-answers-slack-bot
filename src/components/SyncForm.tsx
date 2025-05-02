@@ -199,6 +199,19 @@ export default function SyncForm({ onSyncComplete }: SyncFormProps) {
 
         localStorage.setItem('prds', JSON.stringify(prds));
 
+        // Send the updated documents to the server immediately
+        try {
+          await fetch('/api/synced-documents', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({ documents: prds }),
+          });
+        } catch (error) {
+          console.error('Error updating server with new document data:', error);
+        }
+
         if (onSyncComplete) {
           onSyncComplete();
         }

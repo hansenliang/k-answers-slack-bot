@@ -45,6 +45,7 @@ module.exports = {
         'message-in': 'messageIn 0.2s ease-out',
         'modal-in': 'modalIn 0.15s ease-out',
         'typing': 'typing 1.5s infinite ease-in-out',
+        'word-appear': 'wordAppear 0.3s ease-out forwards',
       },
       keyframes: {
         fadeIn: {
@@ -111,6 +112,16 @@ module.exports = {
           '50%': { 
             opacity: '1',
             transform: 'translateY(-2px)'
+          }
+        },
+        wordAppear: {
+          '0%': { 
+            opacity: '0',
+            transform: 'translateY(10px) scale(0.95)'
+          },
+          '100%': { 
+            opacity: '1',
+            transform: 'translateY(0) scale(1)'
           }
         }
       },
