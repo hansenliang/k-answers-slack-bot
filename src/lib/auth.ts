@@ -25,6 +25,7 @@ declare module "next-auth/jwt" {
 
 /* -------- auth config -------- */
 export const authOptions: NextAuthOptions = {
+  debug: true, // Enable debug logging
   providers: [
     GoogleProvider({
       clientId: process.env.GOOGLE_CLIENT_ID!,
@@ -51,7 +52,11 @@ export const authOptions: NextAuthOptions = {
       token: JWT;
       account?: Account | null;
     }): Promise<JWT> {
+      // Log the JWT callback
+      console.log("JWT callback triggered", { hasAccount: !!account, tokenSub: token.sub });
+      
       if (account) {
+        console.log("Setting token from account");
         token.accessToken = account.access_token;
         token.refreshToken = account.refresh_token;
         token.expiresAt = account.expires_at;
@@ -59,6 +64,7 @@ export const authOptions: NextAuthOptions = {
 
       // If the token is expired, try to refresh it
       if (token.expiresAt && Date.now() >= token.expiresAt * 1000) {
+        console.log("Token expired, attempting refresh");
         try {
           const response = await fetch("https://oauth2.googleapis.com/token", {
             method: "POST",
@@ -75,8 +81,12 @@ export const authOptions: NextAuthOptions = {
 
           const tokens = await response.json();
 
-          if (!response.ok) throw tokens;
+          if (!response.ok) {
+            console.error("Token refresh failed:", tokens);
+            throw tokens;
+          }
 
+          console.log("Token refreshed successfully");
           return {
             ...token,
             accessToken: tokens.access_token,
@@ -98,6 +108,7 @@ export const authOptions: NextAuthOptions = {
       session: Session;
       token: JWT;
     }): Promise<Session> {
+      console.log("Session callback triggered", { hasToken: !!token, sessionUser: !!session.user });
       session.accessToken = token.accessToken;
       session.refreshToken = token.refreshToken;
       session.expiresAt = token.expiresAt;
