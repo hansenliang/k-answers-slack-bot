@@ -135,16 +135,27 @@ export async function POST(request: Request) {
         return doc;
       });
 
-      storedDocuments = processedDocuments;
-      console.log(`Received and stored ${processedDocuments.length} documents from client`);
+      // Instead of replacing storedDocuments, merge the new documents
+      // This prevents reintroducing deleted documents
+      const existingSyncIds = new Set(storedDocuments.map(doc => doc.syncId));
       
-      // Log the first few document IDs and syncIds for debugging
-      if (processedDocuments.length > 0) {
-        const sampleDocs = processedDocuments.slice(0, Math.min(3, processedDocuments.length));
-        console.log('Sample documents:');
-        sampleDocs.forEach(doc => {
-          console.log(`- Title: ${doc.title}, ID: ${doc.id}, syncId: ${doc.syncId}`);
-        });
+      // Only add documents that don't already exist in the stored documents
+      const newDocuments = processedDocuments.filter(doc => !existingSyncIds.has(doc.syncId));
+      
+      if (newDocuments.length > 0) {
+        storedDocuments = [...storedDocuments, ...newDocuments];
+        console.log(`Added ${newDocuments.length} new documents from client`);
+        
+        // Log the first few document IDs and syncIds for debugging
+        if (newDocuments.length > 0) {
+          const sampleDocs = newDocuments.slice(0, Math.min(3, newDocuments.length));
+          console.log('Sample new documents:');
+          sampleDocs.forEach(doc => {
+            console.log(`- Title: ${doc.title}, ID: ${doc.id}, syncId: ${doc.syncId}`);
+          });
+        }
+      } else {
+        console.log('No new documents to add, all documents already exist in server storage');
       }
     }
     

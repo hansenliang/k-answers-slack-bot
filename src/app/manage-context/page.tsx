@@ -19,13 +19,16 @@ export default function ManageContextPage() {
   const { data: session, status } = useSession();
   const [syncedDocs, setSyncedDocs] = useState<SyncedDocument[]>([]);
   const [isLoading, setIsLoading] = useState(true);
+  const [removingDocId, setRemovingDocId] = useState<string | null>(null);
 
   const fetchDocuments = async () => {
     try {
       setIsLoading(true);
       
-      // First, send localStorage data to the server if available
-      await sendStoredDocumentsToServer();
+      // Only send localStorage data to the server on initial load, not after removal
+      if (syncedDocs.length === 0) {
+        await sendStoredDocumentsToServer();
+      }
       
       // Then fetch the document list
       const response = await fetch('/api/synced-documents');
@@ -64,52 +67,62 @@ export default function ManageContextPage() {
   };
 
   // Handle document removal
-  const handleRemoveDocument = async (syncId: string) => {
+  const handleRemoveDocument = async (syncId: string, docId: string) => {
     if (typeof window !== 'undefined') {
       try {
-        console.log(`Attempting to remove document with syncId: ${syncId}`);
+        // Set the document as being removed to show loading state
+        setRemovingDocId(docId);
+        console.log(`Attempting to remove document with syncId: ${syncId}, docId: ${docId}`);
         
+        // 1. First update localStorage
         const storedPrds = localStorage.getItem('prds');
         if (storedPrds) {
           const parsedPrds = JSON.parse(storedPrds);
           console.log(`Found ${parsedPrds.length} documents in localStorage`);
           
-          // Log document we're trying to remove
-          const docToRemove = parsedPrds.find((doc: any) => doc.syncId === syncId);
-          if (docToRemove) {
-            console.log(`Found document to remove: ${docToRemove.title} (ID: ${docToRemove.id}, syncId: ${docToRemove.syncId})`);
-          } else {
-            console.warn(`No document found with syncId: ${syncId}`);
-            // Try with legacy pattern where syncId might not exist
-            const legacyDocToRemove = parsedPrds.find((doc: any) => doc.id === syncId);
-            if (legacyDocToRemove) {
-              console.log(`Found document using ID instead of syncId: ${legacyDocToRemove.title}`);
-              // Update the filter to handle this case
-              const updatedPrds = parsedPrds.filter((doc: any) => doc.id !== syncId);
-              console.log(`Removed document by ID. Remaining docs: ${updatedPrds.length}`);
-              localStorage.setItem('prds', JSON.stringify(updatedPrds));
-              await fetchDocuments();
-              return;
-            }
-          }
-          
-          // Remove only the specific document instance with this syncId
+          // Remove the document
           const updatedPrds = parsedPrds.filter((doc: any) => doc.syncId !== syncId);
           console.log(`Filtered documents. Before: ${parsedPrds.length}, After: ${updatedPrds.length}`);
           
-          if (parsedPrds.length === updatedPrds.length) {
-            console.warn('No documents were removed - syncId might not match any documents');
-          }
-          
+          // Update localStorage
           localStorage.setItem('prds', JSON.stringify(updatedPrds));
+        }
+        
+        // 2. Call the DELETE API to remove from server and Pinecone
+        try {
+          const response = await fetch('/api/synced-documents', {
+            method: 'DELETE',
+            headers: {
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({ 
+              syncId: syncId,
+              documentId: docId
+            }),
+          });
           
-          // Refresh the document list
+          const result = await response.json();
+          
+          if (!response.ok) {
+            console.error('Error from delete API:', result.error);
+          } else {
+            console.log('Delete API success:', result.message);
+            
+            // 3. Update the UI immediately without refetching
+            setSyncedDocs(prevDocs => prevDocs.filter(doc => doc.syncId !== syncId));
+          }
+        } catch (apiError) {
+          console.error('API error when deleting document:', apiError);
+          // Continue to refresh UI anyway
           await fetchDocuments();
-        } else {
-          console.warn('No documents found in localStorage');
         }
       } catch (error) {
         console.error('Error removing document:', error);
+        // Fallback to fetch if anything goes wrong
+        await fetchDocuments();
+      } finally {
+        // Clear the removing state when done
+        setRemovingDocId(null);
       }
     }
   };
@@ -193,11 +206,16 @@ export default function ManageContextPage() {
                       </p>
                     </div>
                     <button 
-                      className="text-xs text-zinc-500 hover:text-red-400 transition-colors"
+                      className={`text-xs ${
+                        removingDocId === doc.id 
+                          ? 'text-red-400 animate-pulse' 
+                          : 'text-zinc-500 hover:text-red-400'
+                      } transition-colors`}
                       aria-label="Remove document"
-                      onClick={() => handleRemoveDocument(doc.syncId)}
+                      onClick={() => handleRemoveDocument(doc.syncId, doc.id)}
+                      disabled={removingDocId === doc.id}
                     >
-                      Remove
+                      {removingDocId === doc.id ? 'Removing...' : 'Remove'}
                     </button>
                   </div>
                 </div>
