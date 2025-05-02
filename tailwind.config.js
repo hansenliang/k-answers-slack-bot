@@ -63,14 +63,27 @@ module.exports = {
         rainbowPulse: {
           '0%': { 
             backgroundPosition: '0% 50%',
+            backgroundSize: '200% 200%',
             opacity: '0.7'
+          },
+          '25%': {
+            backgroundPosition: '50% 100%',
+            backgroundSize: '250% 250%',
+            opacity: '0.8'
           },
           '50%': { 
             backgroundPosition: '100% 50%',
+            backgroundSize: '300% 300%',
             opacity: '0.9'
+          },
+          '75%': {
+            backgroundPosition: '50% 0%',
+            backgroundSize: '250% 250%',
+            opacity: '0.8'
           },
           '100%': {
             backgroundPosition: '0% 50%',
+            backgroundSize: '200% 200%',
             opacity: '0.7'
           }
         },

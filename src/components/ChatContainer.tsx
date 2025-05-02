@@ -287,7 +287,7 @@ export default function ChatContainer() {
         )}
         
         <form onSubmit={handleSubmit} className="relative">
-          <div className="absolute -inset-[2px] bg-gradient-to-r from-purple-500 via-pink-500 to-blue-500 rounded-[14px] opacity-75 blur-[3px] animate-rainbow-pulse"></div>
+          <div className="absolute -inset-[2px] bg-gradient-to-r from-indigo-500 via-purple-500 via-pink-500 via-rose-500 to-blue-500 rounded-[14px] opacity-75 blur-[3px] animate-rainbow-pulse"></div>
           <div className="relative">
             <Textarea
               ref={inputRef}
@@ -306,10 +306,14 @@ export default function ChatContainer() {
               type="submit"
               disabled={!input.trim() || isProcessing}
               aria-label="Send message"
-              className="absolute bottom-3 right-3 rounded-full p-1.5 bg-transparent text-zinc-500 hover:text-zinc-300 transition-colors"
+              className={`absolute top-1/2 -translate-y-1/2 right-3 rounded-full p-2 transition-colors ${
+                input.trim() && !isProcessing 
+                  ? 'bg-white text-black hover:bg-gray-200' 
+                  : 'bg-zinc-800 text-zinc-500'
+              }`}
             >
-              <svg className="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8" />
+              <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.5" d="M12 19V5M5 12l7-7 7 7" />
               </svg>
             </button>
           </div>
