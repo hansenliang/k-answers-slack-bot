@@ -65,21 +65,21 @@ export default function SyncPage() {
             <div className="w-full max-w-4xl space-y-8">
             <SyncForm onSyncComplete={refreshSyncedPrds} />
             {/* Synced PRDs Table - match width with other cards */}
-            <div className="bg-white rounded-xl shadow-lg border border-[#E9DCC6] overflow-x-auto">
-              <h2 className="text-2xl font-bold text-[#232426] px-6 pt-6">Synced Documents</h2>
-                      <h3 className="text-sm text-[#BBC7B6] mb-6 px-6 pt-6">
-                        Whenever you write a PRD, we&apos;ll query these documents to find relevant information to provide ChatPRD
+            <div className="bg-notion-light-card dark:bg-notion-dark-card rounded-xl shadow-lg border border-notion-light-border dark:border-notion-dark-border overflow-x-auto animate-fade-in">
+              <h2 className="text-2xl font-bold text-notion-light-text dark:text-notion-dark-text px-6 pt-6">Synced Documents</h2>
+                      <h3 className="text-sm text-notion-light-lightText dark:text-notion-dark-lightText mb-6 px-6 pt-6">
+                        Whenever you write a PRD, we&apos;ll query these documents to find relevant information to provide K:Answers bot
                       </h3>
-              <table className="min-w-full divide-y divide-[#E9DCC6]">
+              <table className="min-w-full divide-y divide-notion-light-border dark:divide-notion-dark-border">
                 <thead>
                   <tr>
-                    <th className="px-6 py-3 text-left text-xs font-bold uppercase tracking-wider text-[#232426]">Name</th>
+                    <th className="px-6 py-3 text-left text-xs font-bold uppercase tracking-wider text-notion-light-text dark:text-notion-dark-text">Name</th>
                   </tr>
                 </thead>
-                <tbody className="divide-y divide-[#E9DCC6]">
+                <tbody className="divide-y divide-notion-light-border dark:divide-notion-dark-border">
                   {syncedPrds.length === 0 ? (
                     <tr>
-                      <td className="px-6 py-4 text-[#EF6351] text-center font-semibold">No synced PRDs found.</td>
+                      <td className="px-6 py-4 text-notion-light-accent dark:text-notion-dark-accent text-center font-semibold">No synced PRDs found.</td>
                     </tr>
                   ) : (
                     currentPrds.map((prd, idx) => (
@@ -89,7 +89,7 @@ export default function SyncPage() {
                             href={prd.url}
                             target="_blank"
                             rel="noopener noreferrer"
-                            className="text-[#232426] font-semibold underline hover:text-[#EF6351] transition-colors duration-200"
+                            className="text-notion-light-text dark:text-notion-dark-text font-semibold hover:text-notion-light-accent dark:hover:text-notion-dark-accent hover-transition"
                           >
                             {prd.title || 'Untitled PRD'}
                           </a>
@@ -100,19 +100,19 @@ export default function SyncPage() {
                 </tbody>
               </table>
               {totalPages > 1 && (
-                <div className="flex items-center justify-between px-6 py-4 border-t border-[#E9DCC6]">
+                <div className="flex items-center justify-between px-6 py-4 border-t border-notion-light-border dark:border-notion-dark-border">
                   <div className="flex items-center gap-2">
                     <button
                       onClick={() => setCurrentPage(prev => Math.max(prev - 1, 1))}
                       disabled={currentPage === 1}
                       className={`px-3 py-1 rounded-md text-sm font-medium transition-colors
                         ${currentPage === 1 
-                          ? 'text-[#E9DCC6] cursor-not-allowed' 
-                          : 'text-[#232426] hover:text-[#EF6351]'}`}
+                          ? 'text-notion-light-border cursor-not-allowed' 
+                          : 'text-notion-light-text hover:text-notion-light-accent'}`}
                     >
                       Previous
                     </button>
-                    <span className="text-sm text-[#232426]">
+                    <span className="text-sm text-notion-light-text">
                       Page {currentPage} of {totalPages}
                     </span>
                     <button
@@ -120,13 +120,13 @@ export default function SyncPage() {
                       disabled={currentPage === totalPages}
                       className={`px-3 py-1 rounded-md text-sm font-medium transition-colors
                         ${currentPage === totalPages 
-                          ? 'text-[#E9DCC6] cursor-not-allowed' 
-                          : 'text-[#232426] hover:text-[#EF6351]'}`}
+                          ? 'text-notion-light-border cursor-not-allowed' 
+                          : 'text-notion-light-text hover:text-notion-light-accent'}`}
                     >
                       Next
                     </button>
                 </div>
-                  <div className="text-sm text-[#232426]">
+                  <div className="text-sm text-notion-light-text">
                     Showing {startIndex + 1}-{Math.min(endIndex, syncedPrds.length)} of {syncedPrds.length} PRDs
               </div>
                 </div>

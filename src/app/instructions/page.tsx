@@ -6,13 +6,13 @@ export default function Instructions() {
       <Sidebar />
       <div className="max-w-4xl mx-auto px-4 py-8">
         <div className="bg-white rounded-xl shadow-sm p-8">
-          <h1 className="text-3xl font-semibold text-[#232426] mb-8">How to Use ChatPRD</h1>
+          <h1 className="text-3xl font-semibold text-[#232426] mb-8">How to Use K:Answers bot</h1>
           
           <div className="space-y-8">
             <section>
               <h2 className="text-2xl font-semibold text-[#232426] mb-4">1. Store Your Information</h2>
               <p className="text-[#232426] mb-4">
-                Start by providing your personal context in the Store Information section. This helps ChatPRD understand your background and preferences.
+                Start by providing your personal context in the Store Information section. This helps K:Answers bot understand your background and preferences.
               </p>
               <ul className="list-disc pl-6 space-y-2 text-[#232426]">
                 <li>Enter your personal background and experience</li>
@@ -25,7 +25,7 @@ export default function Instructions() {
             <section>
               <h2 className="text-2xl font-semibold text-[#232426] mb-4">2. Query Information</h2>
               <p className="text-[#232426] mb-4">
-                Use the query section to ask questions or request information. ChatPRD will use your stored context to provide relevant responses.
+                Use the query section to ask questions or request information. K:Answers bot will use your stored context to provide relevant responses.
               </p>
               <ul className="list-disc pl-6 space-y-2 text-[#232426]">
                 <li>Enter your question or request in the search box</li>

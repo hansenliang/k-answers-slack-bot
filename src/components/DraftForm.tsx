@@ -235,7 +235,7 @@ export default function DraftForm() {
                   onChange={(e) => setQuery(e.target.value)}
                   rows={4}
                   className="flex-1 rounded-md border border-[#E9DCC6] bg-white px-3 py-2 text-[#232426] shadow-sm focus:border-[#EF6351] focus:outline-none focus:ring-1 focus:ring-[#EF6351]"
-                  placeholder="Ask ChatPRD to help draft your PRD..."
+                  placeholder="Ask K:Answers bot to help draft your PRD..."
                   required
                   autoFocus
                 />

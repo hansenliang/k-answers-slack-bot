@@ -42,13 +42,13 @@ export default function ContextForm() {
     {
       id: 'howYouThinkAboutProduct',
       label: 'How you think about Product',
-      placeholder: 'Give a few examples of how you\'ve solved problems in the past with your product area, and how you generally approach developing your product area. This will help give ChatPRD of how you think about developing your product area.',
+      placeholder: 'Give a few examples of how you\'ve solved problems in the past with your product area, and how you generally approach developing your product area. This will help give K:Answers bot of how you think about developing your product area.',
       rows: 4
     },
     {
       id: 'pillarGoalsKeyTermsBackground',
       label: 'Pillar Goals, Key Terms, and Background',
-      placeholder: 'Provide context about the teams in your pillar, how you\'re product area fits into that pillar achieving the business goals, and any other background information that will help ChatPRD understand the bigger picture and write a better PRD.',
+      placeholder: 'Provide context about the teams in your pillar, how you\'re product area fits into that pillar achieving the business goals, and any other background information that will help K:Answers bot understand the bigger picture and write a better PRD.',
       rows: 2
     },
     {

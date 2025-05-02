@@ -1,70 +1,18 @@
 'use client';
 
-import { useSession } from 'next-auth/react';
-import Sidebar from '@/components/Sidebar';
-import DraftForm from '@/components/DraftForm';
-import PastPRDs from '@/components/PastPRDs';
-import SignIn from '@/app/auth/signin/page';
 import { useEffect } from 'react';
+import { useRouter } from 'next/navigation';
+
 export default function HomePage() {
-  const { data: session, status } = useSession();
+  const router = useRouter();
+
   useEffect(() => {
-    const initializePinecone = async () => {
-      if (session?.user) {
-        try {
-          const response = await fetch('/api/init-pinecone', {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-            },
-          });
-
-          if (!response.ok) {
-            console.error('Failed to initialize Pinecone index');
-          }
-        } catch (error) {
-          console.error('Error initializing Pinecone index:', error);
-        }
-      }
-    };
-
-    initializePinecone();
-  }, [session]);
-
-  if (status === 'loading') {
-    return (
-      <div className="min-h-screen bg-[#FFFAF3] flex items-center justify-center">
-        <div className="text-[#232426] animate-pulse">Loading...</div>
-      </div>
-    );
-  }
-
-  if (!session) {
-    return (
-      <div className="min-h-screen bg-[#FFFAF3] flex items-center justify-center">
-        <SignIn />
-      </div>
-    );
-  }
+    router.push('/chat');
+  }, [router]);
 
   return (
-    <div className="min-h-screen bg-[#FFFAF3]">
-      <Sidebar />
-      <div className="ml-64 flex items-center justify-center min-h-screen">
-        <div className="max-w-7xl w-full px-4 sm:px-6 lg:px-8 py-8 flex justify-center">
-            <div className="w-full max-w-4xl space-y-8">
-            <div>
-              <div className="text-4xl font-medium text-[#232426] mb-8 text-center">
-                We&apos;re 1% Done
-              </div>
-              <div>
-                  <DraftForm />
-                  <PastPRDs />
-              </div>
-            </div>
-          </div>
-        </div>
-      </div>
+    <div className="flex h-screen w-full items-center justify-center bg-gray-900 text-white">
+      <div className="animate-pulse">Redirecting to chat...</div>
     </div>
   );
 }

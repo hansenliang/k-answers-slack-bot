@@ -2,19 +2,68 @@
 @tailwind components;
 @tailwind utilities;
 
-:root {
-  --background: #ffffff;
-  --foreground: #171717;
-}
-
-@media (prefers-color-scheme: dark) {
+@layer base {
   :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
+    /* Light mode variables */
+    --background: 0 0% 100%;
+    --foreground: 40 5% 20%;
+    --card: 0 0% 100%;
+    --card-foreground: 40 5% 20%;
+    --border: 0 0% 88%;
+    --input: 0 0% 88%;
+    --accent: 212 64% 49%;
+    --accent-foreground: 0 0% 100%;
+    --hover: 0 0% 96%;
+    --light-text: 217 19% 27%;
+    --selection: 213 100% 95%;
+  }
+
+  .dark {
+    /* Dark mode variables */
+    --background: 0 0% 10%;
+    --foreground: 0 0% 88%;
+    --card: 0 0% 15%;
+    --card-foreground: 0 0% 88%;
+    --border: 0 0% 20%;
+    --input: 0 0% 20%;
+    --accent: 212 64% 49%;
+    --accent-foreground: 0 0% 100%;
+    --hover: 0 0% 15%;
+    --light-text: 0 0% 60%;
+    --selection: 213 39% 23%;
   }
 }
 
-body {
-  background: var(--background);
-  color: var(--foreground);
+@layer base {
+  * {
+    border-color: theme('colors.notion.light.border');
+    transition: background-color 0.2s ease-in-out, border-color 0.2s ease-in-out, color 0.1s ease-in-out;
+  }
+  
+  .dark * {
+    border-color: theme('colors.notion.dark.border');
+  }
+  
+  body {
+    @apply bg-notion-light-bg text-notion-light-text dark:bg-notion-dark-bg dark:text-notion-dark-text;
+  }
+  
+  ::selection {
+    @apply bg-notion-light-selection dark:bg-notion-dark-selection;
+  }
+}
+
+/* Subtle animations for UI elements */
+@layer utilities {
+  .animate-fade {
+    @apply animate-fade-in;
+  }
+  
+  .animate-slide {
+    @apply animate-slide-in;
+  }
+  
+  .hover-transition {
+    @apply transition-all duration-200 ease-in-out;
+  }
 }

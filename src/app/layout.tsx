@@ -6,8 +6,8 @@ import { Providers } from "./providers";
 const inter = Inter({ subsets: ["latin"] });
 
 export const metadata: Metadata = {
-  title: "ChatPRD",
-  description: "Chat with your PRD",
+  title: "K:Answers Chat",
+  description: "Chat with your documents using AI",
 };
 
 export default function RootLayout({
@@ -16,8 +16,8 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="en">
-      <body className={inter.className + ' bg-[#FFFAF3] text-[#232426]'}>
+    <html lang="en" className="dark" suppressHydrationWarning>
+      <body className={`${inter.className} antialiased bg-gray-900 text-white`}>
         <Providers>{children}</Providers>
       </body>
     </html>
