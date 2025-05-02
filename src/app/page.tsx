@@ -11,8 +11,8 @@ export default function HomePage() {
   }, [router]);
 
   return (
-    <div className="flex h-screen w-full items-center justify-center bg-gray-900 text-white">
-      <div className="animate-pulse">Redirecting to chat...</div>
+    <div className="flex h-screen w-full items-center justify-center bg-black text-white">
+      <div className="animate-pulse text-zinc-400">Redirecting to chat...</div>
     </div>
   );
 }

@@ -9,7 +9,7 @@ export default function ChatPage() {
   // Show loading indicator while checking session
   if (status === 'loading') {
     return (
-      <div className="flex h-screen w-full items-center justify-center bg-gray-900 text-white">
+      <div className="flex h-screen w-full items-center justify-center bg-black text-white">
         <div className="animate-pulse">Loading...</div>
       </div>
     );
@@ -21,7 +21,7 @@ export default function ChatPage() {
   }
 
   return (
-    <div className="flex h-screen w-full items-center justify-center bg-gray-900 p-4">
+    <div className="flex h-screen w-full items-center justify-center bg-black p-4 sm:p-6 md:p-8">
       <ChatContainer />
     </div>
   );

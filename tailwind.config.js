@@ -40,8 +40,11 @@ module.exports = {
         'fade-in': 'fadeIn 0.3s ease-in-out',
         'slide-in': 'slideIn 0.3s ease-in-out',
         'pulse-subtle': 'pulseSubtle 2s infinite',
-        'rainbow-pulse': 'rainbowPulse 8s infinite',
-        'border-glow': 'borderGlow 2s ease-in-out infinite'
+        'rainbow-pulse': 'rainbowPulse 8s infinite linear',
+        'border-glow': 'borderGlow 2s ease-in-out infinite',
+        'message-in': 'messageIn 0.2s ease-out',
+        'modal-in': 'modalIn 0.15s ease-out',
+        'typing': 'typing 1.5s infinite ease-in-out',
       },
       keyframes: {
         fadeIn: {
@@ -57,13 +60,17 @@ module.exports = {
           '50%': { opacity: '0.7' }
         },
         rainbowPulse: {
-          '0%, 100%': { 
+          '0%': { 
             backgroundPosition: '0% 50%',
-            opacity: '0.7'
+            opacity: '0.6'
           },
           '50%': { 
             backgroundPosition: '100% 50%',
-            opacity: '0.9'
+            opacity: '0.8'
+          },
+          '100%': {
+            backgroundPosition: '0% 50%',
+            opacity: '0.6'
           }
         },
         borderGlow: {
@@ -74,6 +81,36 @@ module.exports = {
           '50%': { 
             boxShadow: '0 0 15px rgba(236, 72, 153, 0.7)',
             borderColor: 'rgba(236, 72, 153, 0.8)'
+          }
+        },
+        messageIn: {
+          '0%': { 
+            transform: 'translateY(10px) scale(0.98)', 
+            opacity: '0' 
+          },
+          '100%': { 
+            transform: 'translateY(0) scale(1)', 
+            opacity: '1' 
+          }
+        },
+        modalIn: {
+          '0%': { 
+            transform: 'scale(0.95)', 
+            opacity: '0' 
+          },
+          '100%': { 
+            transform: 'scale(1)', 
+            opacity: '1' 
+          }
+        },
+        typing: {
+          '0%, 100%': { 
+            opacity: '0.3',
+            transform: 'translateY(0px)'
+          },
+          '50%': { 
+            opacity: '1',
+            transform: 'translateY(-2px)'
           }
         }
       },

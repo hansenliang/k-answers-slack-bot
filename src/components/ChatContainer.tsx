@@ -3,7 +3,7 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
-import ManageContextModal from './ManageContextModal';
+import { useRouter } from 'next/navigation';
 
 interface Message {
   id: string;
@@ -13,36 +13,19 @@ interface Message {
 }
 
 export default function ChatContainer() {
+  const router = useRouter();
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState('');
   const [isProcessing, setIsProcessing] = useState(false);
-  const [isModalOpen, setIsModalOpen] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
 
-  // Load messages from localStorage on mount
+  // Auto-focus the input field on mount
   useEffect(() => {
-    const savedMessages = localStorage.getItem('chatMessages');
-    if (savedMessages) {
-      try {
-        const parsedMessages = JSON.parse(savedMessages);
-        const formattedMessages = parsedMessages.map((msg: any) => ({
-          ...msg,
-          timestamp: new Date(msg.timestamp)
-        }));
-        setMessages(formattedMessages);
-      } catch (error) {
-        console.error('Error parsing chat messages:', error);
-      }
+    if (inputRef.current) {
+      inputRef.current.focus();
     }
   }, []);
-
-  // Save messages to localStorage when they change
-  useEffect(() => {
-    if (messages.length > 0) {
-      localStorage.setItem('chatMessages', JSON.stringify(messages));
-    }
-  }, [messages]);
 
   // Auto-scroll to bottom of messages
   useEffect(() => {
@@ -102,13 +85,16 @@ export default function ChatContainer() {
       ]);
     } finally {
       setIsProcessing(false);
+      // Re-focus the input after processing
+      if (inputRef.current) {
+        inputRef.current.focus();
+      }
     }
   };
 
   // Clear chat history
   const handleClearChat = () => {
     setMessages([]);
-    localStorage.removeItem('chatMessages');
   };
 
   // Format timestamp
@@ -117,51 +103,49 @@ export default function ChatContainer() {
   };
 
   return (
-    <div className="relative flex h-full w-full max-w-2xl flex-col overflow-hidden rounded-lg bg-gray-900 text-white shadow-2xl">
-      {/* Rainbow border effect */}
-      <div className="absolute inset-0 -z-10 rounded-lg bg-gradient-to-r from-purple-500 via-pink-500 to-blue-500 p-[2px] opacity-70 blur-[2px] animate-pulse"></div>
-      
-      {/* Header with context management button */}
-      <div className="flex items-center justify-between border-b border-gray-800 p-4">
-        <h1 className="text-xl font-bold">K:Answers Chat</h1>
-        <Button 
-          variant="ghost" 
-          className="text-sm text-gray-400 hover:text-white"
-          onClick={() => setIsModalOpen(true)}
+    <div className="relative flex h-full w-full max-w-[800px] flex-col overflow-hidden rounded-lg bg-black text-white shadow-2xl">
+      {/* Header */}
+      <div className="flex h-[44px] items-center justify-between border-b border-zinc-900 px-4">
+        <h1 className="text-[1.25rem] font-medium">K:Answers Chat</h1>
+        <button 
+          className="text-[0.875rem] text-zinc-400 hover:text-white transition-colors"
+          onClick={() => router.push('/manage-context')}
           aria-label="Manage context"
         >
           Manage context
-        </Button>
+        </button>
       </div>
 
       {/* Message area */}
       <div className="flex-1 overflow-y-auto p-4 space-y-4">
         {messages.length === 0 ? (
           <div className="flex h-full flex-col items-center justify-center text-center">
-            <div className="mb-4 rounded-full bg-gray-800 p-4">
-              <svg className="h-8 w-8 text-blue-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <div className="mb-4 rounded-full bg-zinc-900 p-4 opacity-70">
+              <svg className="h-8 w-8 text-zinc-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.5" d="M8 10h.01M12 10h.01M16 10h.01M9 16H5a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2h-4l-4 4-4-4z" />
               </svg>
             </div>
-            <h3 className="mb-2 text-lg font-medium">Ask me anything</h3>
-            <p className="text-sm text-gray-400">I'll search through your synced documents to find answers.</p>
+            <h3 className="mb-2 text-lg font-medium text-zinc-300">Start by asking a question</h3>
+            <p className="text-sm text-zinc-500 max-w-sm">
+              I'll search through your synced documents to find the most relevant answers.
+            </p>
           </div>
         ) : (
           <>
             {messages.map((message) => (
               <div 
                 key={message.id} 
-                className={`flex ${message.role === 'user' ? 'justify-end' : 'justify-start'}`}
+                className={`flex ${message.role === 'user' ? 'justify-end' : 'justify-start'} animate-message-in`}
               >
                 <div
-                  className={`max-w-[80%] rounded-lg px-4 py-3 ${
+                  className={`max-w-[80%] rounded-[12px] px-4 py-3 ${
                     message.role === 'user'
-                      ? 'bg-blue-600'
-                      : 'bg-gray-800'
+                      ? 'bg-zinc-800'
+                      : 'bg-zinc-900'
                   }`}
                 >
-                  <div className="whitespace-pre-wrap text-sm">{message.content}</div>
-                  <div className="mt-1 text-xs text-gray-400">
+                  <div className="whitespace-pre-wrap text-[1rem]">{message.content}</div>
+                  <div className="mt-1 text-xs text-zinc-500">
                     {formatTime(message.timestamp)}
                   </div>
                 </div>
@@ -170,12 +154,12 @@ export default function ChatContainer() {
 
             {/* Typing indicator */}
             {isProcessing && (
-              <div className="flex justify-start">
-                <div className="max-w-[80%] rounded-lg bg-gray-800 px-4 py-3">
+              <div className="flex justify-start animate-fade-in">
+                <div className="max-w-[80%] rounded-[12px] bg-zinc-900 px-4 py-3">
                   <div className="flex items-center space-x-1">
-                    <div className="h-2 w-2 rounded-full bg-blue-400 animate-bounce" style={{ animationDelay: '0ms' }}></div>
-                    <div className="h-2 w-2 rounded-full bg-blue-400 animate-bounce" style={{ animationDelay: '300ms' }}></div>
-                    <div className="h-2 w-2 rounded-full bg-blue-400 animate-bounce" style={{ animationDelay: '600ms' }}></div>
+                    <div className="h-2 w-2 rounded-full bg-zinc-600 animate-typing" style={{ animationDelay: '0ms' }}></div>
+                    <div className="h-2 w-2 rounded-full bg-zinc-600 animate-typing" style={{ animationDelay: '300ms' }}></div>
+                    <div className="h-2 w-2 rounded-full bg-zinc-600 animate-typing" style={{ animationDelay: '600ms' }}></div>
                   </div>
                 </div>
               </div>
@@ -185,29 +169,30 @@ export default function ChatContainer() {
         <div ref={messagesEndRef} />
       </div>
 
-      {/* Input area */}
-      <div className="border-t border-gray-800 bg-gray-900 p-4">
+      {/* Input area - with rainbow glow */}
+      <div className="border-t border-zinc-900 bg-black p-4">
         {messages.length > 0 && (
           <div className="mb-2 flex justify-end">
             <Button 
               variant="ghost" 
               size="sm" 
               onClick={handleClearChat}
-              className="text-xs text-gray-400 hover:text-white"
+              className="text-xs text-zinc-500 hover:text-white"
             >
               Clear chat
             </Button>
           </div>
         )}
         
-        <form onSubmit={handleSubmit} className="flex items-end gap-2">
-          <div className="relative flex-grow">
+        <form onSubmit={handleSubmit} className="relative">
+          <div className="absolute -inset-[1px] bg-gradient-to-r from-purple-500 via-pink-500 to-blue-500 rounded-[14px] opacity-70 blur-[1px] animate-rainbow-pulse"></div>
+          <div className="relative">
             <Textarea
               ref={inputRef}
               value={input}
               onChange={(e: React.ChangeEvent<HTMLTextAreaElement>) => setInput(e.target.value)}
               placeholder="Ask a question..."
-              className="min-h-[56px] max-h-[120px] resize-none overflow-auto rounded-lg border border-gray-700 bg-gray-800 px-4 py-3 pr-12 text-white placeholder-gray-400 focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
+              className="min-h-[56px] max-h-[120px] resize-none overflow-auto rounded-[12px] border-0 bg-zinc-900 px-4 py-3 pr-12 text-white placeholder-zinc-600 focus:outline-none focus:ring-0 w-full"
               onKeyDown={(e: React.KeyboardEvent<HTMLTextAreaElement>) => {
                 if (e.key === 'Enter' && !e.shiftKey) {
                   e.preventDefault();
@@ -215,25 +200,22 @@ export default function ChatContainer() {
                 }
               }}
             />
-            <Button
+            <button
               type="submit"
               disabled={!input.trim() || isProcessing}
               aria-label="Send message"
-              className="absolute bottom-3 right-3 rounded-full p-1.5 bg-transparent hover:bg-gray-700"
+              className="absolute bottom-3 right-3 rounded-full p-1.5 bg-transparent text-zinc-500 hover:text-zinc-300 transition-colors"
             >
-              <svg className="h-5 w-5 text-blue-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <svg className="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8" />
               </svg>
-            </Button>
+            </button>
           </div>
         </form>
-        <div className="mt-2 text-center text-xs text-gray-500">
+        <div className="mt-2 text-center text-xs text-zinc-600">
           Press Enter to send, Shift+Enter for a new line
         </div>
       </div>
-
-      {/* Context Management Modal */}
-      <ManageContextModal isOpen={isModalOpen} onClose={() => setIsModalOpen(false)} />
     </div>
   );
 } 
