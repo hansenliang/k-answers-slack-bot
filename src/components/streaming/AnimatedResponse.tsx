@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useRef, useEffect } from 'react';
+import React, { useRef, useEffect, useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { debugAnimation } from '@/lib/animation-debug';
 
@@ -69,6 +69,7 @@ const AnimatedResponse: React.FC<AnimatedResponseProps> = ({
   };
   
   const textTokens = processText(text);
+  const [visibleTokens, setVisibleTokens] = useState<number>(0);
   
   // Reference to the last element for auto-scrolling
   const lastTokenRef = useRef<HTMLSpanElement>(null);
@@ -98,11 +99,22 @@ const AnimatedResponse: React.FC<AnimatedResponseProps> = ({
     });
   }, [textTokens.length, isComplete, text]);
   
+  // Update visible tokens count whenever text changes
+  useEffect(() => {
+    if (visibleTokens < textTokens.length) {
+      const timer = setTimeout(() => {
+        setVisibleTokens(prev => Math.min(prev + 1, textTokens.length));
+      }, 30); // Adjust this timing to match the word appearance rate
+      
+      return () => clearTimeout(timer);
+    }
+  }, [textTokens.length, visibleTokens, text]);
+  
   return (
     <div>
       <div ref={containerRef} className={`${className} whitespace-pre-wrap`}>
         <AnimatePresence initial={false}>
-          {textTokens.map((token, index) => (
+          {textTokens.slice(0, visibleTokens).map((token, index) => (
             <motion.span
               key={`token-${index}`}
               initial={{ opacity: 0 }}
@@ -110,10 +122,9 @@ const AnimatedResponse: React.FC<AnimatedResponseProps> = ({
               transition={{ 
                 duration: 0.15,
                 ease: "easeOut",
-                delay: Math.min(0.03 * index, 1), // Cap delay at 1s for long responses
               }}
               className={`inline-block ${token === '\n' ? 'w-full' : ''}`}
-              ref={index === textTokens.length - 1 ? lastTokenRef : undefined}
+              ref={index === visibleTokens - 1 ? lastTokenRef : undefined}
               onAnimationComplete={() => {
                 if (index === textTokens.length - 1) {
                   debugAnimation(`Animation completed for last token`);
@@ -127,7 +138,7 @@ const AnimatedResponse: React.FC<AnimatedResponseProps> = ({
       </div>
       
       {/* Only show timestamp if requested and there's content */}
-      {showTimestamp && (
+      {showTimestamp && visibleTokens === textTokens.length && (
         <motion.div 
           initial={{ opacity: 0 }}
           animate={{ opacity: 1 }}
