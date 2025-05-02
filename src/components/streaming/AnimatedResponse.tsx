@@ -29,30 +29,37 @@ const AnimatedResponse: React.FC<AnimatedResponseProps> = ({
   // Process text to preserve formatting
   // Instead of simple word splitting, handle whitespace preservation
   const processText = (text: string) => {
-    // Preserve newlines by replacing them with a special marker
-    const preserveNewlines = text.replace(/\n/g, ' \n ').replace(/\r/g, '');
+    // First, remove carriage returns
+    let processedText = text.replace(/\r/g, '');
+    
+    // Remove only the leading spaces after newlines
+    // This preserves spaces elsewhere in the text for proper copying
+    processedText = processedText.replace(/\n[ ]+/g, '\n');
     
     // Split by spaces but keep track of consecutive spaces
     const tokens = [];
     let currentToken = '';
     let inWhitespace = false;
     
-    for (let i = 0; i < preserveNewlines.length; i++) {
-      const char = preserveNewlines[i];
+    for (let i = 0; i < processedText.length; i++) {
+      const char = processedText[i];
       
-      if (char === ' ' || char === '\n') {
+      if (char === ' ') {
         if (currentToken) {
           tokens.push(currentToken);
           currentToken = '';
         }
         
-        if (char === '\n') {
-          tokens.push('\n');
-        } else {
-          tokens.push(' ');
+        tokens.push(' ');
+        inWhitespace = true;
+      } else if (char === '\n') {
+        if (currentToken) {
+          tokens.push(currentToken);
+          currentToken = '';
         }
         
-        inWhitespace = true;
+        tokens.push('\n');
+        inWhitespace = false; // Reset whitespace flag at newline
       } else {
         if (inWhitespace) {
           inWhitespace = false;

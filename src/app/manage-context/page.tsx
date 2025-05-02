@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { useRouter } from 'next/navigation';
 import SyncForm from '@/components/SyncForm';
 import { ArrowLeft, RefreshCw } from 'lucide-react';
@@ -24,6 +24,23 @@ interface SyncResultDocument {
   error?: string;
 }
 
+// Add debounce utility
+function debounce<T extends (...args: any[]) => any>(
+  fn: T, 
+  ms: number
+): (...args: Parameters<T>) => void {
+  let timeoutId: ReturnType<typeof setTimeout> | null = null;
+  return function(...args: Parameters<T>) {
+    if (timeoutId) {
+      clearTimeout(timeoutId);
+    }
+    timeoutId = setTimeout(() => {
+      fn(...args);
+      timeoutId = null;
+    }, ms);
+  };
+}
+
 export default function ManageContextPage() {
   const router = useRouter();
   const { data: session, status } = useSession();
@@ -33,11 +50,45 @@ export default function ManageContextPage() {
   const [syncingDocIds, setSyncingDocIds] = useState<string[]>([]);
   const [isSyncingAll, setIsSyncingAll] = useState(false);
   const [syncError, setSyncError] = useState<string | null>(null);
-  // New state for tracking sync progress
+  // Sync progress states
   const [syncProgressDocs, setSyncProgressDocs] = useState<SyncDocument[]>([]);
+  const [currentStep, setCurrentStep] = useState<string | null>(null);
+  const [currentDocumentName, setCurrentDocumentName] = useState<string | null>(null); 
+  const [elapsedTimeMs, setElapsedTimeMs] = useState<number>(0);
+  const [activityLog, setActivityLog] = useState<Array<{
+    message: string,
+    timestamp: Date,
+    type: 'info' | 'debug' | 'error' | 'success'
+  }>>([]);
+  
+  // Polling interval for sync status updates (in ms)
+  const SYNC_STATUS_POLLING_INTERVAL = 2000; 
+  const pollRef = useRef<NodeJS.Timeout | null>(null);
 
-  const fetchDocuments = async () => {
+  // Track document fetch state
+  const fetchInProgressRef = useRef(false);
+  const lastFetchTimeRef = useRef(0);
+  const MIN_FETCH_INTERVAL = 2000; // Minimum time between fetches in ms
+
+  // Function declarations in the ManageContextPage component
+  const fetchDocuments = useCallback(async (force = false) => {
+    // Prevent multiple concurrent fetches
+    if (fetchInProgressRef.current) {
+      console.log("Fetch already in progress, skipping");
+      return;
+    }
+    
+    // Throttle fetches to prevent rapid repetition
+    const now = Date.now();
+    if (!force && now - lastFetchTimeRef.current < MIN_FETCH_INTERVAL) {
+      console.log("Fetch called too soon, skipping");
+      return;
+    }
+    
     try {
+      console.log("Fetching documents...");
+      fetchInProgressRef.current = true;
+      lastFetchTimeRef.current = now;
       setIsLoading(true);
       
       // Only send localStorage data to the server on initial load, not after removal
@@ -47,6 +98,16 @@ export default function ManageContextPage() {
       
       // Then fetch the document list
       const response = await fetch('/api/synced-documents');
+      
+      // Handle 304 Not Modified as a success case - it means documents haven't changed
+      if (response.status === 304) {
+        console.log("Documents unchanged (304 Not Modified)");
+        // Keep existing documents as they are
+        setIsLoading(false);
+        fetchInProgressRef.current = false;
+        return;
+      }
+      
       if (response.ok) {
         const data = await response.json();
         
@@ -57,13 +118,136 @@ export default function ManageContextPage() {
         const uniqueDocs = deduplicate(documents);
         
         setSyncedDocs(uniqueDocs);
+      } else {
+        console.error("Error fetching documents:", response.status);
       }
     } catch (error) {
       console.error('Error fetching documents:', error);
     } finally {
       setIsLoading(false);
+      fetchInProgressRef.current = false;
     }
-  };
+  }, [syncedDocs.length]);
+  
+  // Create a debounced version of fetchDocuments for repeated calls
+  const debouncedFetchDocuments = useCallback(
+    debounce(() => fetchDocuments(), 500),
+    [fetchDocuments]
+  );
+
+  // Function to check sync status from the API
+  const checkSyncStatus = useCallback(async () => {
+    try {
+      console.log("Checking sync status...");
+      const response = await fetch('/api/sync-status?_=' + new Date().getTime()); // Add cache buster
+      
+      // Handle 304 Not Modified as a success case - it means nothing has changed
+      if (response.status === 304) {
+        console.log("Sync status unchanged (304 Not Modified)");
+        // Just continue with current state
+        return isSyncingAll;
+      }
+      
+      if (response.ok) {
+        const status = await response.json();
+        
+        // If a stale sync was detected and reset by the API, refresh documents
+        if (status.wasStale) {
+          console.log("API detected and reset a stale sync, refreshing documents");
+          setIsSyncingAll(false);
+          return false;
+        }
+        
+        if (status.isSyncing) {
+          // Set sync in progress flag
+          setIsSyncingAll(true);
+          
+          // Update document progress
+          if (status.documents && status.documents.length > 0) {
+            console.log("Setting sync progress docs:", status.documents.length);
+            setSyncProgressDocs(status.documents.map((doc: any) => ({
+              id: doc.id,
+              name: doc.name,
+              synced: doc.synced,
+              error: doc.error,
+              currentStep: doc.currentStep,
+              steps: doc.steps
+            })));
+          }
+          
+          // Update current status details
+          setCurrentStep(status.currentStep);
+          setCurrentDocumentName(status.currentDocumentName);
+          
+          // Log elapsed time to help debug
+          console.log("Elapsed time from API:", status.elapsedTimeMs);
+          setElapsedTimeMs(status.elapsedTimeMs || 0);
+          
+          // Update activity log if available
+          if (status.activityLog && status.activityLog.length > 0) {
+            console.log("Setting activity log:", status.activityLog.length, "entries");
+            setActivityLog(status.activityLog.map((entry: any) => ({
+              message: entry.message,
+              timestamp: new Date(entry.timestamp),
+              type: entry.type
+            })));
+          }
+          
+          return true; // Still syncing
+        } else {
+          // Only fetch documents if we're transitioning from syncing -> not syncing
+          const wasSyncing = isSyncingAll;
+          setIsSyncingAll(false);
+          
+          if (wasSyncing) {
+            console.log("Sync finished, scheduling document refresh");
+            debouncedFetchDocuments();
+          }
+          
+          return false; // Not syncing
+        }
+      } else {
+        // Only log errors for status codes other than 304
+        console.error("Error response from sync status API:", response.status);
+      }
+    } catch (error) {
+      console.error('Error checking sync status:', error);
+    }
+    return false;
+  }, [debouncedFetchDocuments, isSyncingAll]);
+
+  // Set up polling for sync status
+  const startSyncStatusPolling = useCallback(() => {
+    console.log("Starting sync status polling");
+    // Clear any existing polling
+    if (pollRef.current) {
+      clearInterval(pollRef.current);
+      pollRef.current = null;
+    }
+    
+    // Do an initial check
+    checkSyncStatus();
+    
+    // Set up polling
+    pollRef.current = setInterval(async () => {
+      console.log("Polling sync status...");
+      const isStillSyncing = await checkSyncStatus();
+      
+      if (!isStillSyncing && pollRef.current) {
+        // If no longer syncing, stop polling
+        console.log("Sync complete, stopping polling");
+        clearInterval(pollRef.current);
+        pollRef.current = null;
+      }
+    }, 2000); // Reduced polling frequency to prevent too many requests
+    
+    return () => {
+      if (pollRef.current) {
+        clearInterval(pollRef.current);
+        pollRef.current = null;
+      }
+    };
+  }, [checkSyncStatus]);
 
   // Helper function to deduplicate documents by ID
   const deduplicate = (documents: SyncedDocument[]) => {
@@ -246,10 +430,18 @@ export default function ManageContextPage() {
       name: doc.name,
       synced: false
     }));
+    console.log("Setting initial docs to track:", docsToTrack.length);
     setSyncProgressDocs(docsToTrack);
+    
+    // Start the timer at 0
+    setElapsedTimeMs(0);
 
     try {
-      // Request streams true for streaming progress
+      // Start polling for status updates immediately
+      console.log("Starting sync status polling for Sync All");
+      startSyncStatusPolling();
+      
+      // Request sync for all documents
       const response = await fetch('/api/sync-all-documents', {
         method: 'POST',
         headers: {
@@ -271,109 +463,23 @@ export default function ManageContextPage() {
             error: 'Sync operation failed' 
           }))
         );
+        
+        // Stop polling on error
+        if (pollRef.current) {
+          clearInterval(pollRef.current);
+          pollRef.current = null;
+        }
+        
+        setIsSyncingAll(false);
         return;
       }
 
       // Process the response
       const result = await response.json();
+      console.log("Sync all documents response:", result);
 
-      // Update localStorage with new timestamps for synced documents
-      if (typeof window !== 'undefined' && result.syncedDocuments?.length > 0) {
-        const storedPrds = localStorage.getItem('prds');
-        if (storedPrds) {
-          const parsedPrds = JSON.parse(storedPrds);
-          
-          // Create a map of successfully synced document IDs for quick lookup
-          const syncedIds = new Set(result.syncedDocuments.map((doc: any) => doc.id));
-          
-          // Update timestamps for synced documents
-          const updatedPrds = parsedPrds.map((doc: any) => {
-            if (syncedIds.has(doc.id)) {
-              return {
-                ...doc,
-                createdAt: new Date().toISOString(), // Update timestamp
-              };
-            }
-            return doc;
-          });
-          
-          localStorage.setItem('prds', JSON.stringify(updatedPrds));
-        }
-      }
-
-      // Create lookup maps for faster processing
-      const syncedDocsMap = new Map<string, SyncResultDocument>(
-        result.syncedDocuments?.map((doc: SyncResultDocument) => [doc.id, doc]) || []
-      );
-      
-      const failedDocsMap = new Map<string, SyncResultDocument>(
-        result.failedDocuments?.map((doc: SyncResultDocument) => [doc.id, doc]) || []
-      );
-      
-      // Update the progress notification with final status for each document
-      setSyncProgressDocs(prevDocs => 
-        prevDocs.map(doc => {
-          // Check if document was successfully synced
-          if (syncedDocsMap.has(doc.id)) {
-            return {
-              ...doc,
-              synced: true
-            };
-          } 
-          // Check if document failed to sync
-          else if (failedDocsMap.has(doc.id)) {
-            const failedDoc = failedDocsMap.get(doc.id);
-            return {
-              ...doc,
-              synced: false,
-              error: failedDoc && failedDoc.error ? failedDoc.error : 'Failed to sync document'
-            };
-          }
-          // Document wasn't found in either success or failure lists
-          else {
-            return {
-              ...doc,
-              synced: false,
-              error: 'Document not processed'
-            };
-          }
-        })
-      );
-
-      // Update UI with new sync times for successful syncs
-      if (result.syncedDocuments?.length > 0) {
-        setSyncedDocs(prevDocs => {
-          return prevDocs.map(doc => {
-            const syncedDoc = syncedDocsMap.get(doc.id);
-            if (syncedDoc) {
-              return { 
-                ...doc, 
-                syncedAt: new Date(syncedDoc.syncedAt || new Date().toISOString()) 
-              };
-            }
-            return doc;
-          });
-        });
-      }
-
-      // If there were failures, show a message
-      if (result.failedCount > 0) {
-        // Format a helpful error message
-        let errorMessage = `Failed to sync ${result.failedCount} of ${result.totalCount} documents`;
-        
-        // Add specific error details if not too many failures
-        if (result.failedCount <= 3) {
-          const failedDetails = result.failedDocuments
-            .map((doc: any) => `${doc.name}: ${doc.error}`)
-            .join('; ');
-          errorMessage += `: ${failedDetails}`;
-        }
-        
-        setSyncError(errorMessage);
-      } else if (result.syncedCount > 0) {
-        // Show success message
-        setSyncError(null);
-      }
+      // Let the polling handle the progress until it's done
+      // Don't manually set isSyncingAll to false here, let the polling detect completion
     } catch (error) {
       console.error('Error syncing all documents:', error);
       setSyncError('Failed to sync documents: ' + (error instanceof Error ? error.message : 'Unknown error'));
@@ -386,24 +492,84 @@ export default function ManageContextPage() {
           error: 'Sync operation failed' 
         }))
       );
-    } finally {
-      // Keep the progress notification visible for a few seconds after completion
-      setTimeout(() => {
-        setIsSyncingAll(false);
-        // Clear progress docs after a delay to give user time to see final status
-        setTimeout(() => {
-          setSyncProgressDocs([]);
-        }, 2000);
-      }, 1000);
+      
+      // Stop polling on error
+      if (pollRef.current) {
+        clearInterval(pollRef.current);
+        pollRef.current = null;
+      }
+      
+      // Make sure to reset syncing state on error
+      setIsSyncingAll(false);
     }
   };
 
-  // Fetch synced documents on page load
+  // Check if there's an ongoing sync when the page loads
   useEffect(() => {
     if (session) {
-      fetchDocuments();
+      // Check if a sync is already in progress FIRST before fetching documents
+      const checkForOngoingSync = async () => {
+        try {
+          const isSyncing = await checkSyncStatus();
+          if (isSyncing) {
+            console.log("Detected ongoing sync, starting polling");
+            startSyncStatusPolling();
+          } else {
+            // Only fetch documents if we're not already syncing
+            fetchDocuments(true); // Force initial fetch
+          }
+        } catch (error) {
+          console.error("Error checking sync status:", error);
+          // Fallback to fetching documents if status check fails
+          fetchDocuments(true);
+        }
+      };
+
+      checkForOngoingSync();
     }
-  }, [session]);
+    
+    // Cleanup on unmount
+    return () => {
+      if (pollRef.current) {
+        clearInterval(pollRef.current);
+        pollRef.current = null;
+      }
+    };
+  }, [session, checkSyncStatus, startSyncStatusPolling, fetchDocuments]);
+
+  // Add an effect to handle page visibility changes
+  useEffect(() => {
+    // This handles when the user returns to the tab/window
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible') {
+        console.log("Page became visible, checking sync status");
+        checkSyncStatus().then(isSyncing => {
+          if (isSyncing) {
+            console.log("Found ongoing sync after returning to page");
+            startSyncStatusPolling();
+          }
+        });
+      }
+    };
+
+    // Listen for visibility changes (user switching tabs/windows)
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    
+    // Also check when the component mounts (might have been server-rendered)
+    if (typeof window !== 'undefined' && document.visibilityState === 'visible') {
+      console.log("Initial visibility check");
+      checkSyncStatus().then(isSyncing => {
+        if (isSyncing) {
+          console.log("Found ongoing sync on initial mount");
+          startSyncStatusPolling();
+        }
+      });
+    }
+    
+    return () => {
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+    };
+  }, [checkSyncStatus, startSyncStatusPolling]);
 
   // Redirect if not authenticated
   if (status === 'loading') {
@@ -550,8 +716,13 @@ export default function ManageContextPage() {
             documents={syncProgressDocs}
             onComplete={() => {
               setSyncProgressDocs([]);
+              setActivityLog([]);
             }}
             position="top-center"
+            currentStep={currentStep || undefined}
+            currentDocumentName={currentDocumentName || undefined}
+            elapsedTimeMs={elapsedTimeMs}
+            activityLog={activityLog}
           />
         </div>
       </div>

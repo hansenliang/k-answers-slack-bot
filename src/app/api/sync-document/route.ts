@@ -6,6 +6,7 @@ import { chunkTextByMultiParagraphs } from '@/app/chunk';
 import { buildPineconeRecords } from '@/app/embed';
 import { getUserIndex } from '@/lib/pinecone';
 import { getSharedIndex } from '@/lib/shared-pinecone';
+import { updateDocumentStatus, addLogEntry } from '../sync-status/route';
 
 interface SyncDocumentRequest {
   documentId: string;
@@ -13,6 +14,9 @@ interface SyncDocumentRequest {
 
 export async function POST(request: Request) {
   try {
+    // Add log entry at the start
+    addLogEntry('Starting document sync process', 'info');
+
     // Authenticate user
     const authSession = await getAuthServerSession();
 
@@ -27,9 +31,8 @@ export async function POST(request: Request) {
     const data: SyncDocumentRequest = await request.json();
     const { documentId } = data;
     
-    console.log(`[DEBUG] Attempting to sync document: ${documentId}`);
-    
     if (!documentId) {
+      addLogEntry('Document ID missing in request', 'error');
       return NextResponse.json(
         { error: 'Document ID is required' },
         { status: 400 }
@@ -63,11 +66,14 @@ export async function POST(request: Request) {
     });
 
     // Initialize the Drive API
+    addLogEntry('Initializing Google Drive API for document: ' + documentId, 'debug');
     console.log('[DEBUG] Initializing Google Drive API');
     const drive = google.drive({ version: 'v3', auth });
+    addLogEntry('Google Drive API initialized successfully', 'debug');
     console.log('[DEBUG] Google Drive API initialized successfully');
 
     // Get document details
+    addLogEntry(`Accessing Google document with ID: ${documentId}`, 'debug');
     try {
       // First, check if the document exists and is accessible
       let docResponse;
@@ -77,6 +83,7 @@ export async function POST(request: Request) {
           fileId: documentId,
           fields: 'id, name, mimeType',
         });
+        addLogEntry('Retrieved document metadata successfully', 'debug');
         console.log(`[DEBUG] Successfully retrieved document metadata`);
       } catch (error: any) {
         console.error('[ERROR] Error getting document:', error);
@@ -123,6 +130,7 @@ export async function POST(request: Request) {
 
       // Fetch document content with error handling for permission issues
       let content: string;
+      addLogEntry('Exporting document content as plain text', 'debug');
       try {
         console.log(`[DEBUG] Attempting to export document content as plain text`);
         const contentResponse = await drive.files.export({
@@ -131,6 +139,7 @@ export async function POST(request: Request) {
         });
         
         content = contentResponse.data as string;
+        addLogEntry(`Exported document content (${content.length} characters)`, 'debug');
         console.log(`[DEBUG] Successfully exported document content (length: ${content?.length || 0} characters)`);
         
         // Check if we actually got content
@@ -170,8 +179,10 @@ export async function POST(request: Request) {
       // Get the user index
       const indexName = formattedUsername;
       let index;
+      addLogEntry('Accessing vector database (Pinecone)', 'debug');
       try {
         index = await getUserIndex(indexName);
+        addLogEntry('Successfully connected to vector database', 'debug');
         console.log(`[DEBUG] Successfully got Pinecone index for user: ${indexName}`);
       } catch (indexError) {
         console.error('[ERROR] Error getting Pinecone index:', indexError);
@@ -182,8 +193,10 @@ export async function POST(request: Request) {
       }
 
       // Document content is ready to be processed
+      addLogEntry('Chunking document content for processing', 'debug');
       console.log(`[DEBUG] Chunking document content`);
       const chunks = chunkTextByMultiParagraphs(content);
+      addLogEntry(`Generated ${chunks.length} chunks from document`, 'debug');
       console.log(`[DEBUG] Generated ${chunks.length} chunks from document`);
       
       if (chunks.length === 0) {
@@ -196,15 +209,18 @@ export async function POST(request: Request) {
       
       try {
         // Build Pinecone records with chunked content
+        addLogEntry(`Building embeddings for ${chunks.length} chunks`, 'debug');
         console.log(`[DEBUG] Building embeddings for ${chunks.length} chunks`);
         const formattedEmbeddings = await buildPineconeRecords(chunks);
+        addLogEntry(`Successfully created ${formattedEmbeddings.length} embeddings`, 'debug');
         console.log(`[DEBUG] Successfully created ${formattedEmbeddings.length} embeddings`);
         
         // Use the namespace
         const namespaceName = 'ns1';
-        console.log(`[DEBUG] Preparing to upsert embeddings to Pinecone index: ${indexName}, namespace: ${namespaceName}`);
+        addLogEntry(`Preparing to upsert embeddings to Pinecone index: ${indexName}, namespace: ${namespaceName}`, 'debug');
         
         // First, delete existing vectors for this document
+        addLogEntry('Checking for existing vectors for document ' + documentId, 'debug');
         try {
           console.log(`[DEBUG] Checking for existing vectors for document ${documentId}`);
           
@@ -281,8 +297,10 @@ export async function POST(request: Request) {
         }));
 
         // Upsert the new embeddings
+        addLogEntry('Upserting embeddings to Pinecone', 'debug');
         try {
           await index.namespace(namespaceName).upsert(embeddingsWithDocId);
+          addLogEntry('Successfully stored embeddings in Pinecone', 'success');
           console.log(`[DEBUG] Successfully stored embeddings in Pinecone`);
           
           // Also store in the shared index for cross-user search
@@ -301,6 +319,7 @@ export async function POST(request: Request) {
             
             // Upsert to the shared index
             await sharedIndex.namespace('ns1').upsert(embeddingsWithUserInfo);
+            addLogEntry('Successfully stored embeddings in shared index', 'success');
             console.log(`[DEBUG] Successfully stored embeddings in shared index`);
           } catch (sharedIndexError) {
             console.error('[ERROR] Failed to store embeddings in shared index:', sharedIndexError);
@@ -309,6 +328,9 @@ export async function POST(request: Request) {
 
           // Update the document timestamp in localStorage via client-side code
           // The client will handle this after getting a successful response
+
+          addLogEntry(`Successfully indexed document: ${doc.name}`, 'success');
+          addLogEntry(`Document sync completed: ${doc.name}`, 'success');
 
           return NextResponse.json({
             success: true,

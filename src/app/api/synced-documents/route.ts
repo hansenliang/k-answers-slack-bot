@@ -30,6 +30,10 @@ interface DeleteDocumentRequest {
 // Store document data that comes from clients (in memory storage)
 let storedDocuments: StoredDocument[] = [];
 
+// Track document list changes for caching
+let lastDocumentsHash: string = '';
+let lastResponseTime: number = 0;
+
 export async function GET() {
   try {
     // Authenticate user
@@ -110,11 +114,41 @@ export async function GET() {
       // Convert map back to array
       const deduplicatedDocuments = Array.from(documentMap.values());
       
+      // Create a hash of the current documents to compare with last response
+      const documentsHash = JSON.stringify({
+        count: deduplicatedDocuments.length,
+        latest: deduplicatedDocuments.map(d => `${d.id}_${d.syncedAt}`)
+      });
+      
+      // If this is the same data we sent recently (within 1 second), return 304 Not Modified
+      const currentTime = Date.now();
+      if (
+        documentsHash === lastDocumentsHash && 
+        currentTime - lastResponseTime < 2000
+      ) {
+        return new Response(null, {
+          status: 304,
+          headers: {
+            'Cache-Control': 'max-age=2',
+            'ETag': `"${documentsHash.substring(0, 8)}"`,
+          }
+        });
+      }
+      
+      // Update cache tracking
+      lastDocumentsHash = documentsHash;
+      lastResponseTime = currentTime;
+      
       return NextResponse.json({ 
         documents: deduplicatedDocuments,
         stats: {
           recordCount: stats.totalRecordCount || 0,
           namespaces: Object.keys(stats.namespaces || {})
+        }
+      }, {
+        headers: {
+          'Cache-Control': 'max-age=2',
+          'ETag': `"${documentsHash.substring(0, 8)}"`,
         }
       });
     } catch (error: any) {
