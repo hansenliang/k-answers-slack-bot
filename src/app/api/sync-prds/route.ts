@@ -106,7 +106,7 @@ export async function POST(request: Request) {
       // Try to validate the pinecone connection before proceeding
       try {
         console.log(`[DEBUG] Attempting to connect to Pinecone...`);
-        const index = await getUserIndex(indexName);
+        await getUserIndex(indexName);
         // Just store the index for later use
         console.log(`[DEBUG] Pinecone connection successful`);
       } catch (pineconeError) {
@@ -172,31 +172,34 @@ export async function POST(request: Request) {
             fields: 'id, name, mimeType',
           });
           console.log(`[DEBUG] Successfully retrieved document metadata`);
-        } catch (error: any) {
+        } catch (error: unknown) {
           console.error('[ERROR] Error getting document:', error);
           
           // Check if the error has a response object (typical for Google API errors)
-          if (error.response) {
-            console.error('[ERROR] Response status:', error.response.status);
-            console.error('[ERROR] Response data:', JSON.stringify(error.response.data || {}));
+          const googleError = error as { response?: { status: number; data: unknown }; message?: string };
+          if (googleError.response) {
+            console.error('[ERROR] Response status:', googleError.response.status);
+            console.error('[ERROR] Response data:', JSON.stringify(googleError.response.data || {}));
           }
           
-          if (error.message && error.message.includes('not found')) {
-            return NextResponse.json(
-              { error: 'Document not found. Please check the document ID or URL.' },
-              { status: 404 }
-            );
-          } else if (error.message && (error.message.includes('permission') || error.message.includes('access'))) {
-            return NextResponse.json(
-              { error: 'You do not have permission to access this document. Make sure it is shared with your Google account.' },
-              { status: 403 }
-            );
-          } else {
-            return NextResponse.json(
-              { error: 'Error accessing Google document: ' + (error.message || 'Unknown error') },
-              { status: 500 }
-            );
+          if (googleError.message) {
+            if (googleError.message.includes('not found')) {
+              return NextResponse.json(
+                { error: 'Document not found. Please check the document ID or URL.' },
+                { status: 404 }
+              );
+            } else if (googleError.message.includes('permission') || googleError.message.includes('access')) {
+              return NextResponse.json(
+                { error: 'You do not have permission to access this document. Make sure it is shared with your Google account.' },
+                { status: 403 }
+              );
+            }
           }
+          
+          return NextResponse.json(
+            { error: 'Error accessing Google document: ' + (googleError.message || 'Unknown error') },
+            { status: 500 }
+          );
         }
 
         const doc = docResponse.data;
@@ -245,13 +248,14 @@ export async function POST(request: Request) {
               { status: 400 }
             );
           }
-        } catch (exportError: any) {
+        } catch (exportError: unknown) {
           console.error('[ERROR] Error exporting document content:', exportError);
           
           // Check if the error has a response object (typical for Google API errors)
-          if (exportError.response) {
-            console.error('[ERROR] Response status:', exportError.response.status);
-            console.error('[ERROR] Response data:', JSON.stringify(exportError.response.data || {}));
+          const googleError = exportError as { response?: { status: number; data: unknown } };
+          if (googleError.response) {
+            console.error('[ERROR] Response status:', googleError.response.status);
+            console.error('[ERROR] Response data:', JSON.stringify(googleError.response.data || {}));
           }
           
           return NextResponse.json(
@@ -396,12 +400,13 @@ export async function POST(request: Request) {
               { status: 500 }
             );
           }
-        } catch (embeddingError: any) {
+        } catch (embeddingError: unknown) {
           console.error('[ERROR] Error creating or storing embeddings:', embeddingError);
           // If it's an OpenAI error, it might have more details in a nested structure
-          if (embeddingError.response) {
-            console.error('[ERROR] OpenAI response status:', embeddingError.response.status);
-            console.error('[ERROR] OpenAI response data:', JSON.stringify(embeddingError.response.data || {}));
+          const apiError = embeddingError as { response?: { status: number; data: unknown } };
+          if (apiError.response) {
+            console.error('[ERROR] OpenAI response status:', apiError.response.status);
+            console.error('[ERROR] OpenAI response data:', JSON.stringify(apiError.response.data || {}));
           }
           return NextResponse.json(
             { error: 'Failed to process document content: ' + (embeddingError instanceof Error ? embeddingError.message : 'Unknown error') },

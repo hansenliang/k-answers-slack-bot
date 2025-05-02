@@ -15,15 +15,6 @@ interface SyncedDocument {
   url?: string;
 }
 
-interface SyncResultDocument {
-  id: string;
-  syncId: string;
-  name: string;
-  syncedAt: string;
-  success: boolean;
-  error?: string;
-}
-
 // Add debounce utility
 function debounce<T extends (...args: any[]) => any>(
   fn: T, 
@@ -61,14 +52,14 @@ export default function ManageContextPage() {
     type: 'info' | 'debug' | 'error' | 'success'
   }>>([]);
   
-  // Polling interval for sync status updates (in ms)
-  const SYNC_STATUS_POLLING_INTERVAL = 2000; 
-  const pollRef = useRef<NodeJS.Timeout | null>(null);
-
   // Track document fetch state
   const fetchInProgressRef = useRef(false);
   const lastFetchTimeRef = useRef(0);
   const MIN_FETCH_INTERVAL = 2000; // Minimum time between fetches in ms
+
+  // Polling interval for sync status updates (in ms)
+  const POLL_INTERVAL = 2000;
+  const pollRef = useRef<NodeJS.Timeout | null>(null);
 
   // Function declarations in the ManageContextPage component
   const fetchDocuments = useCallback(async (force = false) => {
@@ -239,7 +230,7 @@ export default function ManageContextPage() {
         clearInterval(pollRef.current);
         pollRef.current = null;
       }
-    }, 2000); // Reduced polling frequency to prevent too many requests
+    }, POLL_INTERVAL); // Use the defined poll interval constant
     
     return () => {
       if (pollRef.current) {

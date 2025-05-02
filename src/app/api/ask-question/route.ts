@@ -1,7 +1,6 @@
 import { NextResponse } from 'next/server';
 import OpenAI from 'openai';
 import { getAuthServerSession } from '@/lib/auth';
-import { getUserIndex } from '@/lib/pinecone';
 import { queryAllIndices } from '@/lib/shared-pinecone';
 
 // Initialize OpenAI
@@ -12,6 +11,12 @@ const openai = new OpenAI({
 // Define message interface
 interface Message {
   role: 'user' | 'assistant' | 'system';
+  content: string;
+}
+
+// Define conversation message interface
+interface ConversationMessage {
+  role: 'user' | 'assistant';
   content: string;
 }
 
@@ -28,6 +33,8 @@ export async function POST(request: Request) {
     }
 
     // Format username for Pinecone
+    // This variable might be used in future implementations for user-specific indices
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
     const formattedUsername = authSession.user.name
       .toLowerCase()
       .replace(/[^a-z0-9-]/g, '-')
@@ -128,8 +135,8 @@ export async function POST(request: Request) {
       if (conversationHistory && conversationHistory.length > 0) {
         // Filter out only user and assistant messages from history
         const filteredHistory = conversationHistory
-          .filter((msg: any) => msg.role === 'user' || msg.role === 'assistant')
-          .map((msg: any) => ({
+          .filter((msg: ConversationMessage) => msg.role === 'user' || msg.role === 'assistant')
+          .map((msg: ConversationMessage) => ({
             role: msg.role,
             content: msg.content
           }));
@@ -154,17 +161,19 @@ export async function POST(request: Request) {
       console.log(`[DEBUG] Generated answer successfully`);
 
       return NextResponse.json({ answer });
-    } catch (error: any) {
+    } catch (error: unknown) {
       console.error('[ERROR] Failed to process question:', error);
 
       let errorMessage = 'Failed to process your question';
       
-      if (error.message && error.message.includes('OpenAI')) {
-        console.error('[ERROR] OpenAI API error:', error.message);
-        errorMessage = 'There was an issue with the AI service. Please try again later.';
-      } else if (error.message && error.message.includes('Pinecone')) {
-        console.error('[ERROR] Pinecone API error:', error.message);
-        errorMessage = 'There was an issue retrieving data. Please try again later.';
+      if (error instanceof Error) {
+        if (error.message.includes('OpenAI')) {
+          console.error('[ERROR] OpenAI API error:', error.message);
+          errorMessage = 'There was an issue with the AI service. Please try again later.';
+        } else if (error.message.includes('Pinecone')) {
+          console.error('[ERROR] Pinecone API error:', error.message);
+          errorMessage = 'There was an issue retrieving data. Please try again later.';
+        }
       }
 
       return NextResponse.json(

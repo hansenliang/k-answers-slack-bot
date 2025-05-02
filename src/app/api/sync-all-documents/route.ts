@@ -65,7 +65,12 @@ export async function POST(request: Request) {
     }
 
     // Initialize sync status
-    initializeSyncStatus(documents.map((doc: any) => ({
+    interface DocumentData {
+      id?: string;
+      name?: string;
+    }
+
+    initializeSyncStatus(documents.map((doc: DocumentData) => ({
       id: doc.id || 'unknown',
       name: doc.name || `Document ${doc.id}` || 'Unknown document'
     })));
@@ -208,13 +213,12 @@ export async function POST(request: Request) {
       failedDocuments: failures,
       statusDetails: finalStatus
     });
-  } catch (error) {
-    console.error('[ERROR] Error processing sync all request:', error);
-    // Make sure to reset sync status on error
-    addLogEntry(`Sync process failed with error: ${error instanceof Error ? error.message : 'Unknown error'}`, 'error');
-    resetSyncStatus();
+  } catch (error: unknown) {
+    console.error(`[ERROR] Error syncing documents:`, error);
+    
+    const errorDetail = error instanceof Error ? error.message : 'Unknown error';
     return NextResponse.json(
-      { error: 'Failed to sync documents: ' + (error instanceof Error ? error.message : 'Unknown error') },
+      { error: `Failed to sync documents: ${errorDetail}` },
       { status: 500 }
     );
   }

@@ -23,9 +23,6 @@ const AnimatedResponse: React.FC<AnimatedResponseProps> = ({
   timestamp,
   showTimestamp = false
 }) => {
-  // If there's no text, don't render anything
-  if (!text) return null;
-  
   // Process text to preserve formatting
   // Instead of simple word splitting, handle whitespace preservation
   const processText = (text: string) => {
@@ -75,7 +72,7 @@ const AnimatedResponse: React.FC<AnimatedResponseProps> = ({
     return tokens;
   };
   
-  const textTokens = processText(text);
+  const textTokens = text ? processText(text) : [];
   const [visibleTokens, setVisibleTokens] = useState<number>(0);
   
   // Reference for the container
@@ -87,7 +84,7 @@ const AnimatedResponse: React.FC<AnimatedResponseProps> = ({
   
   // Find the scrollable container on mount
   useEffect(() => {
-    if (!containerRef.current) return;
+    if (!containerRef.current || !text) return;
     
     // Find the closest scrollable parent (with overflow-y-auto or overflow-y-scroll)
     let parent = containerRef.current.parentElement;
@@ -124,13 +121,13 @@ const AnimatedResponse: React.FC<AnimatedResponseProps> = ({
       found: !!scrollContainerRef.current,
       containerSelector: scrollContainerRef.current?.className || 'none'
     });
-  }, []);
+  }, [text]);
   
   // Handle smooth token-by-token scrolling without the jumpiness
   useEffect(() => {
     // Only handle scrolling if we're actively streaming (not complete)
     // and we have found a scrollable container
-    if (!scrollContainerRef.current || visibleTokens === 0) return;
+    if (!scrollContainerRef.current || visibleTokens === 0 || !text) return;
     
     const scrollContainer = scrollContainerRef.current;
     
@@ -151,7 +148,7 @@ const AnimatedResponse: React.FC<AnimatedResponseProps> = ({
     
     // Update the last scroll height reference
     lastScrollHeightRef.current = newScrollHeight;
-  }, [visibleTokens, isComplete]);
+  }, [visibleTokens, isComplete, text]);
   
   // Format timestamp
   const formatTime = (date?: Date) => {
@@ -161,6 +158,7 @@ const AnimatedResponse: React.FC<AnimatedResponseProps> = ({
 
   // Debug logging to help troubleshoot the animation
   useEffect(() => {
+    if (!text) return;
     debugAnimation(`Rendering ${textTokens.length} tokens, isComplete: ${isComplete}`, { 
       textLength: text.length,
       visibleTokens,
@@ -170,6 +168,7 @@ const AnimatedResponse: React.FC<AnimatedResponseProps> = ({
   
   // Update visible tokens count whenever text changes
   useEffect(() => {
+    if (!text) return;
     if (visibleTokens < textTokens.length) {
       const timer = setTimeout(() => {
         setVisibleTokens(prev => Math.min(prev + 1, textTokens.length));
@@ -178,6 +177,9 @@ const AnimatedResponse: React.FC<AnimatedResponseProps> = ({
       return () => clearTimeout(timer);
     }
   }, [textTokens.length, visibleTokens, text]);
+  
+  // If there's no text, don't render anything
+  if (!text) return null;
   
   return (
     <div>

@@ -7,7 +7,6 @@ type Theme = "dark" | "light" | "system";
 type ThemeProviderProps = {
   children: React.ReactNode;
   defaultTheme?: Theme;
-  attribute?: string;
   enableSystem?: boolean;
 };
 
@@ -26,7 +25,6 @@ const ThemeProviderContext = createContext<ThemeProviderState>(initialState);
 export function ThemeProvider({
   children,
   defaultTheme = "system",
-  attribute = "class",
   enableSystem = true,
 }: ThemeProviderProps) {
   const [theme, setTheme] = useState<Theme>(defaultTheme);

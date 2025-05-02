@@ -7,7 +7,7 @@ const MAX_SYNC_DURATION = 30 * 60 * 1000; // 30 minutes
 
 // In a real app, this would be in a database or Redis
 // For now we'll use a global object to track sync status across requests
-let globalSyncStatus = {
+const globalSyncStatus = {
   isSyncing: false,
   syncStart: null as Date | null,
   progress: {

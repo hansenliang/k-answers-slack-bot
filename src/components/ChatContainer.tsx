@@ -215,7 +215,7 @@ export default function ChatContainer() {
             </div>
             <h3 className="mb-2 text-lg font-medium text-zinc-300">Start by asking a question</h3>
             <p className="text-sm text-zinc-500 max-w-sm">
-              I'll search through your synced documents to find the most relevant answers.
+              I&apos;ll search through your synced documents to find the most relevant answers.
             </p>
           </div>
         ) : (

@@ -13,6 +13,14 @@ interface Message {
   isComplete?: boolean; // For streaming responses
 }
 
+interface PersistedMessage {
+  id: string;
+  content: string;
+  role: 'user' | 'assistant';
+  timestamp: string; // Stored as ISO string in localStorage
+  isComplete?: boolean;
+}
+
 interface StreamingChatInterfaceProps {
   isProcessing: boolean;
   setIsProcessing: (processing: boolean) => void;
@@ -32,9 +40,9 @@ const StreamingChatInterface: React.FC<StreamingChatInterfaceProps> = ({
     const savedMessages = localStorage.getItem('chatMessages');
     if (savedMessages) {
       try {
-        const parsedMessages = JSON.parse(savedMessages);
+        const parsedMessages = JSON.parse(savedMessages) as PersistedMessage[];
         // Convert string timestamps back to Date objects and ensure isComplete is set
-        const formattedMessages = parsedMessages.map((msg: any) => ({
+        const formattedMessages = parsedMessages.map(msg => ({
           ...msg,
           timestamp: new Date(msg.timestamp),
           isComplete: true // All loaded messages are complete
@@ -215,7 +223,7 @@ const StreamingChatInterface: React.FC<StreamingChatInterfaceProps> = ({
                 ...msg, 
                 content: error instanceof Error 
                   ? `Error: ${error.message}` 
-                  : "I'm sorry, I couldn't process your question. Please try again.",
+                  : "I&apos;m sorry, I couldn&apos;t process your question. Please try again.",
                 isComplete: true
               } 
             : msg
@@ -258,7 +266,7 @@ const StreamingChatInterface: React.FC<StreamingChatInterfaceProps> = ({
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.5" d="M8 10h.01M12 10h.01M16 10h.01M9 16H5a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2h-4l-4 4-4-4z" />
               </svg>
               <p className="text-lg font-medium mb-2">Ask me anything</p>
-              <p className="text-sm">I'll search through your synced documents to find the best answer.</p>
+              <p className="text-sm">I&apos;ll search through your synced documents to find the best answer.</p>
             </div>
           </div>
         ) : (

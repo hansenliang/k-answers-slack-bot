@@ -14,6 +14,12 @@ interface Message {
   content: string;
 }
 
+// Define conversation message interface
+interface ConversationMessage {
+  role: 'user' | 'assistant';
+  content: string;
+}
+
 export async function POST(request: Request) {
   // Authenticate user
   const authSession = await getAuthServerSession();
@@ -26,6 +32,8 @@ export async function POST(request: Request) {
   }
 
   // Format username for Pinecone
+  // This variable might be used in future implementations for user-specific indices
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
   const formattedUsername = authSession.user.name
     .toLowerCase()
     .replace(/[^a-z0-9-]/g, '-')
@@ -124,8 +132,8 @@ export async function POST(request: Request) {
           if (conversationHistory && conversationHistory.length > 0) {
             // Filter out only user and assistant messages from history
             const filteredHistory = conversationHistory
-              .filter((msg: any) => msg.role === 'user' || msg.role === 'assistant')
-              .map((msg: any) => ({
+              .filter((msg: ConversationMessage) => msg.role === 'user' || msg.role === 'assistant')
+              .map((msg: ConversationMessage) => ({
                 role: msg.role,
                 content: msg.content
               }));

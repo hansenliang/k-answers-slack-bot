@@ -134,10 +134,10 @@ export async function POST(request: Request) {
         message: `Document with ID ${documentId} removed successfully`,
         deletedDocumentIds: Array.from(deletedDocumentIds)
       });
-    } catch (error: any) {
+    } catch (error: unknown) {
       console.error('[ERROR] Failed to delete document:', error);
       return NextResponse.json(
-        { error: 'Failed to delete document', details: error.message },
+        { error: 'Failed to delete document', details: error instanceof Error ? error.message : 'Unknown error' },
         { status: 500 }
       );
     }

@@ -6,7 +6,9 @@ import { chunkTextByMultiParagraphs } from '@/app/chunk';
 import { buildPineconeRecords } from '@/app/embed';
 import { getUserIndex } from '@/lib/pinecone';
 import { getSharedIndex } from '@/lib/shared-pinecone';
-import { updateDocumentStatus, addLogEntry } from '../sync-status/route';
+import { addLogEntry } from '../sync-status/route';
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+import { updateDocumentStatus } from '../sync-status/route';
 
 interface SyncDocumentRequest {
   documentId: string;
@@ -85,27 +87,36 @@ export async function POST(request: Request) {
         });
         addLogEntry('Retrieved document metadata successfully', 'debug');
         console.log(`[DEBUG] Successfully retrieved document metadata`);
-      } catch (error: any) {
+      } catch (error: unknown) {
         console.error('[ERROR] Error getting document:', error);
         
-        if (error.response) {
-          console.error('[ERROR] Response status:', error.response.status);
-          console.error('[ERROR] Response data:', JSON.stringify(error.response.data || {}));
+        // Check if the error has a response object (typical for Google API errors)
+        const googleError = error as { response?: { status: number; data: unknown } };
+        if (googleError.response) {
+          console.error('[ERROR] Response status:', googleError.response.status);
+          console.error('[ERROR] Response data:', JSON.stringify(googleError.response.data || {}));
         }
         
-        if (error.message && error.message.includes('not found')) {
-          return NextResponse.json(
-            { error: 'Document not found. Please check the document ID or URL.' },
-            { status: 404 }
-          );
-        } else if (error.message && (error.message.includes('permission') || error.message.includes('access'))) {
-          return NextResponse.json(
-            { error: 'You do not have permission to access this document. Make sure it is shared with your Google account.' },
-            { status: 403 }
-          );
+        if (error instanceof Error) {
+          if (error.message.includes('not found')) {
+            return NextResponse.json(
+              { error: 'Document not found. Please check the document ID or URL.' },
+              { status: 404 }
+            );
+          } else if (error.message.includes('permission') || error.message.includes('access')) {
+            return NextResponse.json(
+              { error: 'You do not have permission to access this document. Make sure it is shared with your Google account.' },
+              { status: 403 }
+            );
+          } else {
+            return NextResponse.json(
+              { error: 'Error accessing Google document: ' + error.message },
+              { status: 500 }
+            );
+          }
         } else {
           return NextResponse.json(
-            { error: 'Error accessing Google document: ' + (error.message || 'Unknown error') },
+            { error: 'Error accessing Google document: Unknown error' },
             { status: 500 }
           );
         }
@@ -159,12 +170,14 @@ export async function POST(request: Request) {
             { status: 400 }
           );
         }
-      } catch (exportError: any) {
+      } catch (exportError: unknown) {
         console.error('[ERROR] Error exporting document content:', exportError);
         
-        if (exportError.response) {
-          console.error('[ERROR] Response status:', exportError.response.status);
-          console.error('[ERROR] Response data:', JSON.stringify(exportError.response.data || {}));
+        // Check if the error has a response object (typical for Google API errors)
+        const googleError = exportError as { response?: { status: number; data: unknown } };
+        if (googleError.response) {
+          console.error('[ERROR] Response status:', googleError.response.status);
+          console.error('[ERROR] Response data:', JSON.stringify(googleError.response.data || {}));
         }
         
         return NextResponse.json(
