@@ -14,7 +14,7 @@ interface GoogleDoc {
 
 export default function SyncForm({ onSyncComplete }: SyncFormProps) {
   const [inputValue, setInputValue] = useState('');
-  const [syncStatus, setSyncStatus] = useState('');
+  const [syncStatus, setSyncStatus] = useState<string>('');
   const [isSyncing, setIsSyncing] = useState(false);
   const [documents, setDocuments] = useState<Document[]>([]);
   const [inputType, setInputType] = useState<'folder' | 'document'>('folder');
@@ -47,12 +47,52 @@ export default function SyncForm({ onSyncComplete }: SyncFormProps) {
     setRetryCount(0);
   };
 
-  const handleRetry = () => {
-    // Increment retry count and attempt sync again
-    setRetryCount(prev => prev + 1);
-    setErrorDetails(null);
+  const handleRetry = async () => {
+    if (!documents.length) return;
+    
+    setIsSyncing(true);
     setSyncStatus('');
-    handleSyncPRDs(new Event('submit') as any);
+    setErrorDetails(null);
+
+    try {
+      const response = await fetch('/api/sync', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ url: documents[0].name }),
+      });
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        throw new Error(data.error || 'Failed to sync document');
+      }
+
+      // Update the document status
+      const updatedDocuments = documents.map(doc => ({
+        ...doc,
+        synced: true,
+        error: undefined,
+      }));
+
+      setDocuments(updatedDocuments);
+      setSyncStatus('Document synced successfully');
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : 'An unexpected error occurred';
+      setErrorDetails(errorMessage);
+      setSyncStatus('Error syncing document');
+      
+      // Update the document with the error
+      const updatedDocuments = documents.map(doc => ({
+        ...doc,
+        synced: false,
+        error: errorMessage,
+      }));
+      setDocuments(updatedDocuments);
+    } finally {
+      setIsSyncing(false);
+    }
   };
 
   const handleSyncPRDs = async (e: React.FormEvent) => {
@@ -443,7 +483,7 @@ export default function SyncForm({ onSyncComplete }: SyncFormProps) {
           <div className="font-medium">{syncStatus}</div>
           
           {errorDetails && (
-            <div className="text-xs bg-notion-light-hover dark:bg-notion-dark-hover p-2 rounded-md max-h-[100px] overflow-y-auto">
+            <div className="text-xs bg-notion-light-hover/50 dark:bg-notion-dark-hover/50 p-2 rounded-md max-h-[100px] overflow-y-auto">
               <code className="whitespace-pre-wrap">{errorDetails}</code>
             </div>
           )}
@@ -451,7 +491,7 @@ export default function SyncForm({ onSyncComplete }: SyncFormProps) {
           {syncStatus.includes('error') && inputType === 'document' && (
             <button
               onClick={handleRetry}
-              className="text-xs py-1 px-3 bg-notion-light-hover dark:bg-notion-dark-hover hover:bg-notion-light-selection dark:hover:bg-notion-dark-selection rounded-md transition-colors"
+              className="text-xs py-1 px-3 bg-notion-light-hover/50 dark:bg-notion-dark-hover/50 hover:bg-notion-light-selection/50 dark:hover:bg-notion-dark-selection/50 rounded-md transition-colors"
               disabled={isSyncing}
             >
               Retry Sync

@@ -9,6 +9,7 @@ export interface Document {
   id: string
   name: string
   synced: boolean
+  error?: string
 }
 
 export interface ProgressNotificationProps {
@@ -117,75 +118,92 @@ export function ProgressNotification({
     <AnimatePresence>
       {visible && (
         <motion.div
-          initial={{ y: 20, opacity: 0 }}
+          initial={{ y: -10, opacity: 0 }}
           animate={{ y: 0, opacity: 1 }}
-          exit={{ y: 20, opacity: 0 }}
+          exit={{ y: -10, opacity: 0 }}
           transition={{
             type: "spring",
-            damping: 25,
-            stiffness: 300,
+            damping: 30,
+            stiffness: 350,
             exit: { duration: 0.3, ease: "easeOut" },
           }}
-          className={`fixed z-50 ${positionClasses[position]}`}
+          className={`fixed z-50 ${positionClasses[position]} pointer-events-auto`}
         >
           <motion.div
-            className="backdrop-blur-md bg-notion-light-card dark:bg-notion-dark-card border border-notion-light-border dark:border-notion-dark-border shadow-lg rounded-md overflow-hidden"
+            className="backdrop-blur-md bg-zinc-900 border border-zinc-800 shadow-lg rounded-lg overflow-hidden dark"
             style={{
-              boxShadow: "0 4px 20px rgba(0, 0, 0, 0.08)",
+              boxShadow: "0 8px 32px rgba(0, 0, 0, 0.35)",
+              width: "min(440px, 90vw)",
             }}
             exit={{ opacity: 0, scale: 0.98 }}
             transition={{ exit: { duration: 0.3 } }}
+            initial={{ scale: 0.98 }}
+            animate={{ scale: 1 }}
           >
             <div className="px-5 py-4">
               {/* Header with progress and dismiss button */}
               <div className="flex items-start justify-between mb-3">
                 <div className="flex items-center gap-3 pr-2">
-                  <div className="relative">
+                  <motion.div 
+                    className="relative"
+                    animate={isComplete ? { scale: [1, 1.1, 1] } : {}}
+                    transition={{ duration: 0.5 }}
+                  >
                     <svg className="w-10 h-10">
                       <circle 
                         cx="20" 
                         cy="20" 
                         r="18" 
                         fill="none" 
-                        className="stroke-notion-light-border dark:stroke-notion-dark-border" 
-                        strokeWidth="2" 
+                        className="stroke-zinc-700" 
+                        strokeWidth="2.5" 
                       />
                       <motion.circle
                         cx="20"
                         cy="20"
                         r="18"
                         fill="none"
-                        className={isComplete ? "stroke-notion-light-accent dark:stroke-notion-dark-accent" : "stroke-notion-light-accent dark:stroke-notion-dark-accent opacity-80"}
-                        strokeWidth="2"
+                        className={isComplete ? "stroke-green-400" : "stroke-blue-400"}
+                        strokeWidth="2.5"
                         strokeDasharray={2 * Math.PI * 18}
                         strokeDashoffset={2 * Math.PI * 18 * (1 - completionPercentage / 100)}
                         strokeLinecap="round"
                         initial={{ strokeDashoffset: 2 * Math.PI * 18 }}
                         animate={{ strokeDashoffset: 2 * Math.PI * 18 * (1 - completionPercentage / 100) }}
-                        transition={{ duration: 0.5, ease: "easeInOut" }}
+                        transition={{ duration: 0.8, ease: "easeInOut" }}
                         transform="rotate(-90 20 20)"
                       />
                     </svg>
                     <div className="absolute inset-0 flex items-center justify-center">
-                      <span className="text-xs font-medium text-notion-light-accent dark:text-notion-dark-accent">
+                      <motion.span 
+                        className={`text-xs font-medium ${isComplete ? "text-green-400" : "text-blue-400"}`}
+                        key={completionPercentage}
+                        initial={{ scale: 0.8, opacity: 0.8 }}
+                        animate={{ scale: 1, opacity: 1 }}
+                        transition={{ duration: 0.2 }}
+                      >
                         {completionPercentage}%
-                      </span>
+                      </motion.span>
                     </div>
-                  </div>
+                  </motion.div>
                   <div>
-                    <h3 className="font-medium text-notion-light-text dark:text-notion-dark-text">Syncing Documents</h3>
-                    <p className="text-xs text-notion-light-lightText dark:text-notion-dark-lightText">
-                      {syncedDocs} of {totalDocs} documents synced
+                    <h3 className="font-medium text-white">
+                      {isComplete ? "Sync Complete" : "Syncing Documents"}
+                    </h3>
+                    <p className="text-xs text-zinc-400">
+                      {isComplete 
+                        ? "All documents have been processed"
+                        : `${syncedDocs} of ${totalDocs} documents synced`}
                     </p>
                   </div>
                 </div>
                 <button
                   onClick={handleDismiss}
-                  className="ml-2 text-notion-light-lightText dark:text-notion-dark-lightText hover:text-notion-light-accent dark:hover:text-notion-dark-accent transition-colors"
+                  className="ml-2 text-zinc-500 hover:text-zinc-300 transition-colors"
                   aria-label="Dismiss notification"
                 >
                   <svg
-                    className="w-6 h-6"
+                    className="w-5 h-5"
                     fill="none"
                     stroke="currentColor"
                     strokeWidth="1.5"
@@ -199,7 +217,7 @@ export function ProgressNotification({
               {/* Document history list */}
               <div
                 ref={historyRef}
-                className="max-h-[180px] overflow-y-auto pr-1 space-y-2"
+                className="max-h-[180px] overflow-y-auto pr-1 space-y-1.5 scrollbar-thin scrollbar-thumb-zinc-700 scrollbar-track-transparent"
               >
                 {documents.map((doc) => (
                   <DocumentItem key={doc.id} document={doc} isNew={doc.synced && recentlySynced.includes(doc.id)} />
@@ -209,10 +227,10 @@ export function ProgressNotification({
 
             {/* Progress bar at bottom */}
             <motion.div
-              className="h-0.5 bg-notion-light-accent dark:bg-notion-dark-accent"
+              className={`h-1 ${isComplete ? "bg-green-400" : "bg-blue-400"}`}
               initial={{ width: "0%" }}
               animate={{ width: `${completionPercentage}%` }}
-              transition={{ duration: 0.3 }}
+              transition={{ duration: 0.5 }}
             />
           </motion.div>
         </motion.div>
@@ -227,8 +245,7 @@ interface DocumentItemProps {
 }
 
 function DocumentItem({ document, isNew }: DocumentItemProps) {
-  // Improved error detection to catch more error cases and patterns
-  const hasError = !document.synced && (
+  const hasError = document.error || (!document.synced && (
     document.name.toLowerCase().includes('failed') || 
     document.name.toLowerCase().includes('error') || 
     document.name.toLowerCase().includes('permission') ||
@@ -238,19 +255,7 @@ function DocumentItem({ document, isNew }: DocumentItemProps) {
     document.name.toLowerCase().includes('401') ||
     document.name.toLowerCase().includes('500') ||
     document.name.toLowerCase().includes('404')
-  );
-
-  // Split the document name to show original name and error separately if there's an error pattern
-  let displayName = document.name;
-  let errorMessage = '';
-  
-  if (hasError && document.name.includes(' - ')) {
-    const parts = document.name.split(' - ');
-    if (parts.length >= 2) {
-      displayName = parts[0];
-      errorMessage = parts.slice(1).join(' - ');
-    }
-  }
+  ));
 
   return (
     <motion.div
@@ -258,25 +263,25 @@ function DocumentItem({ document, isNew }: DocumentItemProps) {
       initial={isNew ? { opacity: 0, y: -10 } : { opacity: 1 }}
       animate={{ opacity: 1, y: 0 }}
       transition={{ type: "spring", damping: 20 }}
-      className="flex items-center gap-2 rounded-md p-2 hover:bg-notion-light-hover dark:hover:bg-notion-dark-hover hover-transition"
+      className="flex items-center gap-2 rounded-md p-2 hover:bg-zinc-800/50 hover-transition"
     >
       <div className="flex-shrink-0">
         {document.synced ? (
           <motion.div
             initial={{ scale: 0.8 }}
             animate={{ scale: 1 }}
-            className="flex h-6 w-6 items-center justify-center rounded-full bg-notion-light-selection dark:bg-notion-dark-selection"
+            className="flex h-6 w-6 items-center justify-center rounded-full bg-zinc-800/80"
           >
-            <CheckCircle2 className="h-3.5 w-3.5 text-notion-light-accent dark:text-notion-dark-accent" />
+            <CheckCircle2 className="h-3.5 w-3.5 text-green-400" />
           </motion.div>
         ) : hasError ? (
           <motion.div
             animate={{ scale: [1, 1.1, 1] }}
             transition={{ duration: 0.3 }}
-            className="flex h-6 w-6 items-center justify-center rounded-full bg-notion-light-hover dark:bg-notion-dark-hover"
+            className="flex h-6 w-6 items-center justify-center rounded-full bg-zinc-800/80"
           >
             <svg 
-              className="h-3.5 w-3.5 text-notion-light-error dark:text-notion-dark-error" 
+              className="h-3.5 w-3.5 text-red-400" 
               fill="none" 
               stroke="currentColor" 
               viewBox="0 0 24 24" 
@@ -289,28 +294,26 @@ function DocumentItem({ document, isNew }: DocumentItemProps) {
           <motion.div
             animate={{ rotate: 360 }}
             transition={{ duration: 1.5, repeat: Number.POSITIVE_INFINITY, ease: "linear" }}
-            className="flex h-6 w-6 items-center justify-center rounded-full bg-notion-light-hover dark:bg-notion-dark-hover"
+            className="flex h-6 w-6 items-center justify-center rounded-full bg-zinc-800/80"
           >
-            <Loader2 className="h-3.5 w-3.5 text-notion-light-lightText dark:text-notion-dark-lightText" />
+            <Loader2 className="h-3.5 w-3.5 text-blue-400" />
           </motion.div>
         )}
       </div>
 
-      <div className="flex-1 truncate">
+      <div className="flex-1 min-w-0">
         <p className={`text-sm truncate ${
           hasError 
-            ? "text-notion-light-error dark:text-notion-dark-error" 
-            : "text-notion-light-text dark:text-notion-dark-text"
+            ? "text-red-400" 
+            : "text-white"
         }`}>
-          {hasError && errorMessage ? (
-            <>
-              <span className="font-medium">{displayName}</span>
-              <span className="opacity-80"> - {errorMessage}</span>
-            </>
-          ) : (
-            document.name
-          )}
+          {document.name}
         </p>
+        {document.error && (
+          <p className="text-xs text-red-400 mt-0.5">
+            {document.error}
+          </p>
+        )}
       </div>
     </motion.div>
   )

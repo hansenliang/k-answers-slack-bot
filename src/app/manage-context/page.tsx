@@ -5,6 +5,7 @@ import { useRouter } from 'next/navigation';
 import SyncForm from '@/components/SyncForm';
 import { ArrowLeft, RefreshCw } from 'lucide-react';
 import { useSession } from 'next-auth/react';
+import { ProgressNotification, type Document as SyncDocument } from '@/components/progress-notification';
 
 interface SyncedDocument {
   id: string;         // Document ID (from Google Docs)
@@ -12,6 +13,15 @@ interface SyncedDocument {
   name: string;
   syncedAt: Date;
   url?: string;
+}
+
+interface SyncResultDocument {
+  id: string;
+  syncId: string;
+  name: string;
+  syncedAt: string;
+  success: boolean;
+  error?: string;
 }
 
 export default function ManageContextPage() {
@@ -23,6 +33,8 @@ export default function ManageContextPage() {
   const [syncingDocIds, setSyncingDocIds] = useState<string[]>([]);
   const [isSyncingAll, setIsSyncingAll] = useState(false);
   const [syncError, setSyncError] = useState<string | null>(null);
+  // New state for tracking sync progress
+  const [syncProgressDocs, setSyncProgressDocs] = useState<SyncDocument[]>([]);
 
   const fetchDocuments = async () => {
     try {
@@ -228,7 +240,16 @@ export default function ManageContextPage() {
     setSyncError(null);
     setIsSyncingAll(true);
 
+    // Initialize progress tracking for all documents
+    const docsToTrack = syncedDocs.map(doc => ({
+      id: doc.id,
+      name: doc.name,
+      synced: false
+    }));
+    setSyncProgressDocs(docsToTrack);
+
     try {
+      // Request streams true for streaming progress
       const response = await fetch('/api/sync-all-documents', {
         method: 'POST',
         headers: {
@@ -236,13 +257,25 @@ export default function ManageContextPage() {
         }
       });
 
-      const result = await response.json();
-
       if (!response.ok) {
-        console.error('Error syncing all documents:', result.error);
-        setSyncError(result.error || 'Failed to sync documents');
+        // Handle general error from the API
+        const errorResult = await response.json();
+        console.error('Error syncing all documents:', errorResult.error);
+        setSyncError(errorResult.error || 'Failed to sync documents');
+        
+        // Mark all documents as failed in the progress tracker
+        setSyncProgressDocs(prevDocs => 
+          prevDocs.map(doc => ({ 
+            ...doc, 
+            synced: false, 
+            error: 'Sync operation failed' 
+          }))
+        );
         return;
       }
+
+      // Process the response
+      const result = await response.json();
 
       // Update localStorage with new timestamps for synced documents
       if (typeof window !== 'undefined' && result.syncedDocuments?.length > 0) {
@@ -268,22 +301,55 @@ export default function ManageContextPage() {
         }
       }
 
+      // Create lookup maps for faster processing
+      const syncedDocsMap = new Map<string, SyncResultDocument>(
+        result.syncedDocuments?.map((doc: SyncResultDocument) => [doc.id, doc]) || []
+      );
+      
+      const failedDocsMap = new Map<string, SyncResultDocument>(
+        result.failedDocuments?.map((doc: SyncResultDocument) => [doc.id, doc]) || []
+      );
+      
+      // Update the progress notification with final status for each document
+      setSyncProgressDocs(prevDocs => 
+        prevDocs.map(doc => {
+          // Check if document was successfully synced
+          if (syncedDocsMap.has(doc.id)) {
+            return {
+              ...doc,
+              synced: true
+            };
+          } 
+          // Check if document failed to sync
+          else if (failedDocsMap.has(doc.id)) {
+            const failedDoc = failedDocsMap.get(doc.id);
+            return {
+              ...doc,
+              synced: false,
+              error: failedDoc && failedDoc.error ? failedDoc.error : 'Failed to sync document'
+            };
+          }
+          // Document wasn't found in either success or failure lists
+          else {
+            return {
+              ...doc,
+              synced: false,
+              error: 'Document not processed'
+            };
+          }
+        })
+      );
+
       // Update UI with new sync times for successful syncs
       if (result.syncedDocuments?.length > 0) {
         setSyncedDocs(prevDocs => {
-          // Create a map of successfully synced documents with their new sync times
-          const syncedDocsMap = new Map<string, { syncedAt: Date }>(
-            result.syncedDocuments.map((doc: { id: string; syncedAt?: string }) => [
-              doc.id, 
-              { syncedAt: new Date(doc.syncedAt || new Date().toISOString()) }
-            ])
-          );
-          
-          // Update each document in the UI
           return prevDocs.map(doc => {
             const syncedDoc = syncedDocsMap.get(doc.id);
             if (syncedDoc) {
-              return { ...doc, syncedAt: syncedDoc.syncedAt };
+              return { 
+                ...doc, 
+                syncedAt: new Date(syncedDoc.syncedAt || new Date().toISOString()) 
+              };
             }
             return doc;
           });
@@ -292,17 +358,43 @@ export default function ManageContextPage() {
 
       // If there were failures, show a message
       if (result.failedCount > 0) {
-        const failedNames = result.failedDocuments
-          .map((doc: any) => doc.name)
-          .join(', ');
+        // Format a helpful error message
+        let errorMessage = `Failed to sync ${result.failedCount} of ${result.totalCount} documents`;
         
-        setSyncError(`Failed to sync ${result.failedCount} document(s): ${failedNames}`);
+        // Add specific error details if not too many failures
+        if (result.failedCount <= 3) {
+          const failedDetails = result.failedDocuments
+            .map((doc: any) => `${doc.name}: ${doc.error}`)
+            .join('; ');
+          errorMessage += `: ${failedDetails}`;
+        }
+        
+        setSyncError(errorMessage);
+      } else if (result.syncedCount > 0) {
+        // Show success message
+        setSyncError(null);
       }
     } catch (error) {
       console.error('Error syncing all documents:', error);
       setSyncError('Failed to sync documents: ' + (error instanceof Error ? error.message : 'Unknown error'));
+      
+      // Mark all as failed in the progress tracker
+      setSyncProgressDocs(prevDocs => 
+        prevDocs.map(doc => ({ 
+          ...doc, 
+          synced: false, 
+          error: 'Sync operation failed' 
+        }))
+      );
     } finally {
-      setIsSyncingAll(false);
+      // Keep the progress notification visible for a few seconds after completion
+      setTimeout(() => {
+        setIsSyncingAll(false);
+        // Clear progress docs after a delay to give user time to see final status
+        setTimeout(() => {
+          setSyncProgressDocs([]);
+        }, 2000);
+      }, 1000);
     }
   };
 
@@ -344,7 +436,7 @@ export default function ManageContextPage() {
 
         {/* Sync form section */}
         <div className="mb-10 bg-zinc-900 rounded-lg p-6">
-          <h2 className="text-lg font-medium mb-4">Sync a Document</h2>
+          <h2 className="text-lg font-medium mb-4">Add a Document</h2>
           <p className="text-zinc-400 text-sm mb-6">
             Add documents to provide context for your questions. The AI will search through 
             these documents to find the most relevant answers.
@@ -449,6 +541,18 @@ export default function ManageContextPage() {
               <p className="text-sm mt-2">Use the form above to sync your first document.</p>
             </div>
           )}
+        </div>
+
+        {/* Progress notification */}
+        <div className="fixed inset-0 z-50 pointer-events-none">
+          <ProgressNotification
+            isLoading={isSyncingAll}
+            documents={syncProgressDocs}
+            onComplete={() => {
+              setSyncProgressDocs([]);
+            }}
+            position="top-center"
+          />
         </div>
       </div>
     </div>
