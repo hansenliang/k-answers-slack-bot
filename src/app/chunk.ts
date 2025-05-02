@@ -63,7 +63,7 @@ export function chunkTextByMultiParagraphs(
                 messages: [
                     {
                         role: "user",
-                        content: "You are a helpful assistant that is providing context on my product requirement documents. You are given a chunk of text from each PRD. Your job is to clean the formatting of the chunk to be human readable, and also return a summary of the text in a few sentences. This is from documents outlining product features for a Helpdesk Product.I want you to act like an expert product manager and provide a summary of the text in a few sentences Please be concise and to the point. Here is the chunk: " + chunk,
+                        content: "You are a helpful assistant that is providing context for a Q&A AI agent. You are given a chunk of text from a knowledge base. Your job is to clean the formatting of the chunk to be human readable, and also return a summary of the text in a few sentences. When you see a question, think of how it might be phrased in multiple ways. Provide the summary of the text in a few sentences, including alternative ways to phrase each question or title. Please be concise and to the point. Here is the chunk: " + chunk,
                     },
                 ],
             });  

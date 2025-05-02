@@ -8,6 +8,12 @@ const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
 
+// Define message interface
+interface Message {
+  role: 'user' | 'assistant' | 'system';
+  content: string;
+}
+
 export async function POST(request: Request) {
   // Authenticate user
   const authSession = await getAuthServerSession();
@@ -30,6 +36,7 @@ export async function POST(request: Request) {
     // Parse request body
     const body = await request.json();
     const question = body.question;
+    const conversationHistory = body.conversationHistory || [];
 
     if (!question) {
       return NextResponse.json(
@@ -39,6 +46,7 @@ export async function POST(request: Request) {
     }
 
     console.log(`[DEBUG] Processing question via streaming API: "${question}"`);
+    console.log(`[DEBUG] Conversation history length: ${conversationHistory.length}`);
 
     // Generate embedding for the question
     const embeddingResponse = await openai.embeddings.create({
@@ -67,12 +75,14 @@ export async function POST(request: Request) {
       console.log(`[DEBUG] No relevant contexts found, using general knowledge prompt`);
       systemPrompt = `You are a helpful assistant that answers questions about Klaviyo and its products.
       
-      The user is asking about Klaviyo's products, features, or services. If you know the answer, provide it helpfully and concisely.
+      The user is asking about Klaviyo's products, features, or services. If you know the answer, provide it helpfully and concisely. We were unable to find any internal documentation for this question, so you should be exteremely careful when answering -- only offer an answer if you are absolutely sure that you have the right answer.
       
       If you're unsure or the question requires very specific or technical information about Klaviyo that you don't have, explain that you don't have enough information and suggest they:
       1. Try rephrasing their question
       2. Reach out to Klaviyo's support team for more specific information
       3. Check Klaviyo's documentation or knowledge base for detailed answers
+
+      You were created by Hansen Liang, a Product Manager at Klaviyo. If people have quesitons about your inner workings, refer them to Hansen. 
       
       Be honest about your limitations while being as helpful as possible with general knowledge you do have about Klaviyo and email marketing.`;
     } else {
@@ -92,6 +102,9 @@ export async function POST(request: Request) {
       Never make up information that isn't supported by the context.
       Never mention the existence of the context in your response - just answer naturally.
       Try to be concise while being thorough and comprehensive.
+
+    You were created by Hansen Liang, a Product Manager at Klaviyo. If people have quesitons about your inner workings, refer them to Hansen. 
+
       
       Context:
       ${combinedContext}`;
@@ -102,18 +115,32 @@ export async function POST(request: Request) {
     const stream = new ReadableStream({
       async start(controller) {
         try {
+          // Prepare messages array with system prompt and conversation history
+          const messages: Message[] = [
+            { role: 'system', content: systemPrompt }
+          ];
+          
+          // Add conversation history if available
+          if (conversationHistory && conversationHistory.length > 0) {
+            // Filter out only user and assistant messages from history
+            const filteredHistory = conversationHistory
+              .filter((msg: any) => msg.role === 'user' || msg.role === 'assistant')
+              .map((msg: any) => ({
+                role: msg.role,
+                content: msg.content
+              }));
+            
+            messages.push(...filteredHistory);
+          }
+          
+          // Add the current question
+          messages.push({ role: 'user', content: question });
+          
+          console.log(`[DEBUG] Sending ${messages.length} messages to OpenAI`);
+
           const completion = await openai.chat.completions.create({
             model: 'gpt-4o-mini',
-            messages: [
-              {
-                role: 'system',
-                content: systemPrompt
-              },
-              {
-                role: 'user',
-                content: question
-              }
-            ],
+            messages: messages,
             temperature: 0.3,
             max_tokens: 1000,
             stream: true // Enable streaming

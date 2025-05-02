@@ -9,6 +9,12 @@ const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
 
+// Define message interface
+interface Message {
+  role: 'user' | 'assistant' | 'system';
+  content: string;
+}
+
 export async function POST(request: Request) {
   try {
     // Authenticate user
@@ -31,6 +37,7 @@ export async function POST(request: Request) {
     // Parse request body
     const body = await request.json();
     const question = body.question;
+    const conversationHistory = body.conversationHistory || [];
 
     if (!question) {
       return NextResponse.json(
@@ -40,6 +47,7 @@ export async function POST(request: Request) {
     }
 
     console.log(`[DEBUG] Processing question: "${question}"`);
+    console.log(`[DEBUG] Conversation history length: ${conversationHistory.length}`);
 
     try {
       // Generate embedding for the question
@@ -111,19 +119,33 @@ export async function POST(request: Request) {
         ${combinedContext}`;
       }
 
+      // Prepare messages array with system prompt and conversation history
+      const messages: Message[] = [
+        { role: 'system', content: systemPrompt }
+      ];
+      
+      // Add conversation history if available
+      if (conversationHistory && conversationHistory.length > 0) {
+        // Filter out only user and assistant messages from history
+        const filteredHistory = conversationHistory
+          .filter((msg: any) => msg.role === 'user' || msg.role === 'assistant')
+          .map((msg: any) => ({
+            role: msg.role,
+            content: msg.content
+          }));
+        
+        messages.push(...filteredHistory);
+      }
+      
+      // Add the current question
+      messages.push({ role: 'user', content: question });
+      
+      console.log(`[DEBUG] Sending ${messages.length} messages to OpenAI`);
+
       // Generate an answer using OpenAI
       const completion = await openai.chat.completions.create({
         model: 'gpt-4o-mini',
-        messages: [
-          {
-            role: 'system',
-            content: systemPrompt
-          },
-          {
-            role: 'user',
-            content: question
-          }
-        ],
+        messages: messages,
         temperature: 0.3,
         max_tokens: 1000,
       });

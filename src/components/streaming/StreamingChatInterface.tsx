@@ -113,13 +113,31 @@ const StreamingChatInterface: React.FC<StreamingChatInterfaceProps> = ({
     ]);
 
     try {
-      // Call streaming API
+      // Format previous messages for the API
+      // We filter to keep only the last 10 messages to avoid hitting token limits
+      const previousMessages = messages
+        .slice(-10)
+        .map(msg => ({
+          role: msg.role,
+          content: msg.content
+        }));
+      
+      // Add current user message
+      previousMessages.push({
+        role: userMessage.role,
+        content: userMessage.content
+      });
+
+      // Call streaming API with conversation history
       const response = await fetch('/api/ask-question-stream', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify({ question: userMessage.content }),
+        body: JSON.stringify({ 
+          question: userMessage.content,
+          conversationHistory: previousMessages
+        }),
       });
 
       if (!response.ok) {
