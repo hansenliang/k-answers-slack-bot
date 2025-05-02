@@ -419,22 +419,22 @@ export default function SyncForm({ onSyncComplete }: SyncFormProps) {
           />
           <button
             type="submit"
-            className={`w-10 h-10 rounded-full flex items-center justify-center text-white shadow-md focus:outline-none focus:ring-2 focus:ring-offset-2 ${
+            className={`h-[40px] px-4 rounded-md text-sm font-medium ${
               isSyncing 
-                ? 'bg-notion-light-border dark:bg-notion-dark-border cursor-not-allowed' 
-                : 'bg-notion-light-accent dark:bg-notion-dark-accent hover:bg-notion-light-accentHover dark:hover:bg-notion-dark-accentHover focus:ring-notion-light-accent dark:focus:ring-notion-dark-accent'
+                ? 'bg-zinc-600 text-zinc-300 cursor-not-allowed' 
+                : 'bg-white text-black hover:bg-zinc-100 transition-colors'
             }`}
             disabled={isSyncing}
           >
-            <svg className="w-5 h-5 rotate-[-90deg]" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" d="M9 5l7 7-7 7" />
-            </svg>
+            {isSyncing ? 'Adding...' : 'Add'}
           </button>
         </div>
         <div className="text-xs text-notion-light-lightText dark:text-notion-dark-lightText animate-fade">
-          {inputType === 'document' 
-            ? 'Google Docs URL detected - will sync this document only' 
-            : 'Folder ID detected - will sync all documents in this folder'}
+          {inputValue && (
+            inputType === 'document' 
+              ? 'Google Docs URL detected - will sync this document only' 
+              : 'Folder ID detected - will sync all documents in this folder'
+          )}
         </div>
       </form>
 

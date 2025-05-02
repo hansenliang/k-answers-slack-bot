@@ -3,7 +3,7 @@
 import React, { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import SyncForm from '@/components/SyncForm';
-import { ArrowLeft } from 'lucide-react';
+import { ArrowLeft, RefreshCw } from 'lucide-react';
 import { useSession } from 'next-auth/react';
 
 interface SyncedDocument {
@@ -20,6 +20,9 @@ export default function ManageContextPage() {
   const [syncedDocs, setSyncedDocs] = useState<SyncedDocument[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [removingDocId, setRemovingDocId] = useState<string | null>(null);
+  const [syncingDocIds, setSyncingDocIds] = useState<string[]>([]);
+  const [isSyncingAll, setIsSyncingAll] = useState(false);
+  const [syncError, setSyncError] = useState<string | null>(null);
 
   const fetchDocuments = async () => {
     try {
@@ -152,6 +155,157 @@ export default function ManageContextPage() {
     }
   };
 
+  // Handle syncing a single document
+  const handleSyncDocument = async (docId: string) => {
+    if (syncingDocIds.includes(docId)) {
+      return; // Already syncing
+    }
+
+    setSyncError(null);
+    setSyncingDocIds(prev => [...prev, docId]);
+
+    try {
+      const response = await fetch('/api/sync-document', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ documentId: docId }),
+      });
+
+      const result = await response.json();
+
+      if (!response.ok) {
+        console.error('Error syncing document:', result.error);
+        setSyncError(result.error || 'Failed to sync document');
+        return;
+      }
+
+      // Update document in localStorage with new timestamp
+      if (typeof window !== 'undefined') {
+        const storedPrds = localStorage.getItem('prds');
+        if (storedPrds) {
+          const parsedPrds = JSON.parse(storedPrds);
+          
+          // Find the document by ID
+          const updatedPrds = parsedPrds.map((doc: any) => {
+            if (doc.id === docId) {
+              return {
+                ...doc,
+                createdAt: new Date().toISOString(), // Update timestamp
+              };
+            }
+            return doc;
+          });
+          
+          localStorage.setItem('prds', JSON.stringify(updatedPrds));
+        }
+      }
+
+      // Update UI with new sync time
+      setSyncedDocs(prevDocs => 
+        prevDocs.map(doc => 
+          doc.id === docId 
+            ? { ...doc, syncedAt: new Date(result.syncedAt) } 
+            : doc
+        )
+      );
+
+    } catch (error) {
+      console.error('Error syncing document:', error);
+      setSyncError('Failed to sync document: ' + (error instanceof Error ? error.message : 'Unknown error'));
+    } finally {
+      setSyncingDocIds(prev => prev.filter(id => id !== docId));
+    }
+  };
+
+  // Handle syncing all documents
+  const handleSyncAllDocuments = async () => {
+    if (isSyncingAll) {
+      return; // Already syncing
+    }
+
+    setSyncError(null);
+    setIsSyncingAll(true);
+
+    try {
+      const response = await fetch('/api/sync-all-documents', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        }
+      });
+
+      const result = await response.json();
+
+      if (!response.ok) {
+        console.error('Error syncing all documents:', result.error);
+        setSyncError(result.error || 'Failed to sync documents');
+        return;
+      }
+
+      // Update localStorage with new timestamps for synced documents
+      if (typeof window !== 'undefined' && result.syncedDocuments?.length > 0) {
+        const storedPrds = localStorage.getItem('prds');
+        if (storedPrds) {
+          const parsedPrds = JSON.parse(storedPrds);
+          
+          // Create a map of successfully synced document IDs for quick lookup
+          const syncedIds = new Set(result.syncedDocuments.map((doc: any) => doc.id));
+          
+          // Update timestamps for synced documents
+          const updatedPrds = parsedPrds.map((doc: any) => {
+            if (syncedIds.has(doc.id)) {
+              return {
+                ...doc,
+                createdAt: new Date().toISOString(), // Update timestamp
+              };
+            }
+            return doc;
+          });
+          
+          localStorage.setItem('prds', JSON.stringify(updatedPrds));
+        }
+      }
+
+      // Update UI with new sync times for successful syncs
+      if (result.syncedDocuments?.length > 0) {
+        setSyncedDocs(prevDocs => {
+          // Create a map of successfully synced documents with their new sync times
+          const syncedDocsMap = new Map<string, { syncedAt: Date }>(
+            result.syncedDocuments.map((doc: { id: string; syncedAt?: string }) => [
+              doc.id, 
+              { syncedAt: new Date(doc.syncedAt || new Date().toISOString()) }
+            ])
+          );
+          
+          // Update each document in the UI
+          return prevDocs.map(doc => {
+            const syncedDoc = syncedDocsMap.get(doc.id);
+            if (syncedDoc) {
+              return { ...doc, syncedAt: syncedDoc.syncedAt };
+            }
+            return doc;
+          });
+        });
+      }
+
+      // If there were failures, show a message
+      if (result.failedCount > 0) {
+        const failedNames = result.failedDocuments
+          .map((doc: any) => doc.name)
+          .join(', ');
+        
+        setSyncError(`Failed to sync ${result.failedCount} document(s): ${failedNames}`);
+      }
+    } catch (error) {
+      console.error('Error syncing all documents:', error);
+      setSyncError('Failed to sync documents: ' + (error instanceof Error ? error.message : 'Unknown error'));
+    } finally {
+      setIsSyncingAll(false);
+    }
+  };
+
   // Fetch synced documents on page load
   useEffect(() => {
     if (session) {
@@ -200,7 +354,33 @@ export default function ManageContextPage() {
 
         {/* Synced documents list */}
         <div className="bg-zinc-900 rounded-lg p-6">
-          <h2 className="text-lg font-medium mb-4">Synced Documents</h2>
+          <div className="flex justify-between items-center mb-4">
+            <h2 className="text-lg font-medium">Synced Documents</h2>
+            
+            {syncedDocs.length > 0 && (
+              <button
+                className={`text-xs flex items-center px-2 py-1 rounded ${
+                  isSyncingAll 
+                    ? 'bg-zinc-700 text-zinc-400 cursor-not-allowed' 
+                    : 'bg-zinc-800 text-zinc-300 hover:bg-zinc-700 hover:text-white'
+                } transition-colors`}
+                onClick={handleSyncAllDocuments}
+                disabled={isSyncingAll}
+                aria-label="Sync all documents"
+              >
+                <RefreshCw
+                  className={`h-3 w-3 mr-1 ${isSyncingAll ? 'animate-spin' : ''}`}
+                />
+                <span>{isSyncingAll ? 'Syncing...' : 'Sync All'}</span>
+              </button>
+            )}
+          </div>
+          
+          {syncError && (
+            <div className="mb-4 p-2 bg-red-900/30 border border-red-800 rounded text-red-200 text-sm">
+              {syncError}
+            </div>
+          )}
           
           {isLoading ? (
             <div className="flex justify-center py-8">
@@ -230,18 +410,35 @@ export default function ManageContextPage() {
                         Synced on {new Date(doc.syncedAt).toLocaleDateString()} at {new Date(doc.syncedAt).toLocaleTimeString()}
                       </p>
                     </div>
-                    <button 
-                      className={`text-xs ${
-                        removingDocId === doc.id 
-                          ? 'text-red-400 animate-pulse' 
-                          : 'text-zinc-500 hover:text-red-400'
-                      } transition-colors`}
-                      aria-label="Remove document"
-                      onClick={() => handleRemoveDocument(doc.syncId, doc.id)}
-                      disabled={removingDocId === doc.id}
-                    >
-                      {removingDocId === doc.id ? 'Removing...' : 'Remove'}
-                    </button>
+                    <div className="flex items-center space-x-2">
+                      <button 
+                        className={`text-xs flex items-center ${
+                          syncingDocIds.includes(doc.id) 
+                            ? 'text-blue-400 cursor-not-allowed' 
+                            : 'text-zinc-500 hover:text-blue-400'
+                        } transition-colors`}
+                        aria-label="Sync document"
+                        onClick={() => handleSyncDocument(doc.id)}
+                        disabled={syncingDocIds.includes(doc.id)}
+                      >
+                        <RefreshCw 
+                          className={`h-3 w-3 mr-1 ${syncingDocIds.includes(doc.id) ? 'animate-spin' : ''}`} 
+                        />
+                        {syncingDocIds.includes(doc.id) ? 'Syncing...' : 'Sync'}
+                      </button>
+                      <button 
+                        className={`text-xs ${
+                          removingDocId === doc.id 
+                            ? 'text-red-400 animate-pulse' 
+                            : 'text-zinc-500 hover:text-red-400'
+                        } transition-colors`}
+                        aria-label="Remove document"
+                        onClick={() => handleRemoveDocument(doc.syncId, doc.id)}
+                        disabled={removingDocId === doc.id}
+                      >
+                        {removingDocId === doc.id ? 'Removing...' : 'Remove'}
+                      </button>
+                    </div>
                   </div>
                 </div>
               ))}
