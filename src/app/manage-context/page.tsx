@@ -7,7 +7,8 @@ import { ArrowLeft } from 'lucide-react';
 import { useSession } from 'next-auth/react';
 
 interface SyncedDocument {
-  id: string;
+  id: string;         // Document ID (from Google Docs)
+  syncId: string;     // Unique identifier for this specific sync instance
   name: string;
   syncedAt: Date;
   url?: string;
@@ -63,17 +64,49 @@ export default function ManageContextPage() {
   };
 
   // Handle document removal
-  const handleRemoveDocument = async (documentId: string) => {
+  const handleRemoveDocument = async (syncId: string) => {
     if (typeof window !== 'undefined') {
       try {
+        console.log(`Attempting to remove document with syncId: ${syncId}`);
+        
         const storedPrds = localStorage.getItem('prds');
         if (storedPrds) {
           const parsedPrds = JSON.parse(storedPrds);
-          const updatedPrds = parsedPrds.filter((doc: any) => doc.id !== documentId);
+          console.log(`Found ${parsedPrds.length} documents in localStorage`);
+          
+          // Log document we're trying to remove
+          const docToRemove = parsedPrds.find((doc: any) => doc.syncId === syncId);
+          if (docToRemove) {
+            console.log(`Found document to remove: ${docToRemove.title} (ID: ${docToRemove.id}, syncId: ${docToRemove.syncId})`);
+          } else {
+            console.warn(`No document found with syncId: ${syncId}`);
+            // Try with legacy pattern where syncId might not exist
+            const legacyDocToRemove = parsedPrds.find((doc: any) => doc.id === syncId);
+            if (legacyDocToRemove) {
+              console.log(`Found document using ID instead of syncId: ${legacyDocToRemove.title}`);
+              // Update the filter to handle this case
+              const updatedPrds = parsedPrds.filter((doc: any) => doc.id !== syncId);
+              console.log(`Removed document by ID. Remaining docs: ${updatedPrds.length}`);
+              localStorage.setItem('prds', JSON.stringify(updatedPrds));
+              await fetchDocuments();
+              return;
+            }
+          }
+          
+          // Remove only the specific document instance with this syncId
+          const updatedPrds = parsedPrds.filter((doc: any) => doc.syncId !== syncId);
+          console.log(`Filtered documents. Before: ${parsedPrds.length}, After: ${updatedPrds.length}`);
+          
+          if (parsedPrds.length === updatedPrds.length) {
+            console.warn('No documents were removed - syncId might not match any documents');
+          }
+          
           localStorage.setItem('prds', JSON.stringify(updatedPrds));
           
           // Refresh the document list
           await fetchDocuments();
+        } else {
+          console.warn('No documents found in localStorage');
         }
       } catch (error) {
         console.error('Error removing document:', error);
@@ -138,7 +171,7 @@ export default function ManageContextPage() {
           ) : syncedDocs.length > 0 ? (
             <div className="space-y-2">
               {syncedDocs.map((doc) => (
-                <div key={doc.id} className="border border-zinc-800 rounded-md p-4">
+                <div key={doc.syncId} className="border border-zinc-800 rounded-md p-4">
                   <div className="flex justify-between items-start">
                     <div>
                       <h3 className="text-white font-medium">
@@ -162,7 +195,7 @@ export default function ManageContextPage() {
                     <button 
                       className="text-xs text-zinc-500 hover:text-red-400 transition-colors"
                       aria-label="Remove document"
-                      onClick={() => handleRemoveDocument(doc.id)}
+                      onClick={() => handleRemoveDocument(doc.syncId)}
                     >
                       Remove
                     </button>

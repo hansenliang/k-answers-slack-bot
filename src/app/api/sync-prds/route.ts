@@ -288,9 +288,62 @@ export async function POST(request: Request) {
           const namespaceName = 'ns1';
           console.log(`[DEBUG] Preparing to upsert embeddings to Pinecone index: ${indexName}, namespace: ${namespaceName}`);
           
+          // First, check if document already exists in the index and delete old vectors 
+          try {
+            console.log(`[DEBUG] Checking for existing vectors for document ${documentId}`);
+            
+            // Create a metadata filter - this needs to use the correct Pinecone filter syntax
+            const filter = {
+              documentId: { $eq: documentId }
+            };
+            
+            // List vectors for this document
+            // We need an embedding vector to query, so we'll use the first one from our new embeddings
+            if (formattedEmbeddings.length > 0) {
+              const sampleVector = formattedEmbeddings[0].values;
+              
+              // Query to see if there are any vectors for this document
+              const countResponse = await index.namespace(namespaceName).query({
+                vector: sampleVector,
+                topK: 1,
+                filter: filter,
+                includeMetadata: true,
+              });
+              
+              // If we found matches, delete them
+              if (countResponse.matches && countResponse.matches.length > 0) {
+                console.log(`[DEBUG] Found existing vectors for document ${documentId}. Deleting before re-syncing.`);
+                
+                // Use deleteOne for each ID or deleteMany if available
+                const idsToDelete = countResponse.matches.map(match => match.id);
+                
+                if (idsToDelete.length > 0) {
+                  await index.namespace(namespaceName).deleteMany(idsToDelete);
+                  console.log(`[DEBUG] Successfully deleted ${idsToDelete.length} old vectors for document ${documentId}`);
+                }
+              } else {
+                console.log(`[DEBUG] No existing vectors found for document ${documentId}`);
+              }
+            } else {
+              console.log(`[DEBUG] No embeddings created, skipping check for existing vectors.`);
+            }
+          } catch (filterError) {
+            console.error('[ERROR] Error checking for existing vectors:', filterError);
+            // Continue with upsert anyway
+          }
+
+          // Add documentId to each vector's metadata
+          const embeddingsWithDocId = formattedEmbeddings.map(item => ({
+            ...item,
+            metadata: {
+              ...item.metadata,
+              documentId: documentId,
+            }
+          }));
+
           // Upsert the embeddings in a try-catch to handle any Pinecone errors
           try {
-            await index.namespace(namespaceName).upsert(formattedEmbeddings);
+            await index.namespace(namespaceName).upsert(embeddingsWithDocId);
             console.log(`[DEBUG] Successfully stored embeddings in Pinecone`);
           } catch (pineconeError) {
             console.error('[ERROR] Failed to upsert embeddings to Pinecone:', pineconeError);

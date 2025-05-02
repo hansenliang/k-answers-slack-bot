@@ -163,15 +163,39 @@ export default function SyncForm({ onSyncComplete }: SyncFormProps) {
           )
         );
 
-        // Store the document metadata in localStorage
+        // Store the document metadata in localStorage with a unique sync ID
         const storedPrds = localStorage.getItem('prds');
         const prds = storedPrds ? JSON.parse(storedPrds) : [];
-        prds.push({
-          title: data.documentName,
-          url: `https://docs.google.com/document/d/${documentId}`,
-          createdAt: new Date().toISOString(),
-          id: documentId
-        });
+
+        // Generate a unique sync ID for this operation
+        const syncId = `sync_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
+
+        // Check if document with same ID already exists
+        const existingDocIndex = prds.findIndex((existingDoc: any) => existingDoc.id === documentId);
+
+        if (existingDocIndex >= 0) {
+          // Update the existing document with new metadata and syncId
+          prds[existingDocIndex] = {
+            ...prds[existingDocIndex],
+            title: data.documentName,
+            url: `https://docs.google.com/document/d/${documentId}`,
+            createdAt: new Date().toISOString(),
+            syncId: syncId,
+            id: documentId
+          };
+          console.log(`Updated existing document "${data.documentName}" in localStorage`);
+        } else {
+          // Add new document
+          prds.push({
+            title: data.documentName,
+            url: `https://docs.google.com/document/d/${documentId}`,
+            createdAt: new Date().toISOString(),
+            syncId: syncId,
+            id: documentId
+          });
+          console.log(`Added document "${data.documentName}" to localStorage`);
+        }
+
         localStorage.setItem('prds', JSON.stringify(prds));
 
         if (onSyncComplete) {
@@ -298,12 +322,36 @@ export default function SyncForm({ onSyncComplete }: SyncFormProps) {
             // Store the document name in prds localStorage
             const storedPrds = localStorage.getItem('prds');
             const prds = storedPrds ? JSON.parse(storedPrds) : [];
-            prds.push({
-              title: data.documentName,
-              url: `https://docs.google.com/document/d/${doc.id}`,
-              createdAt: new Date().toISOString(),
-              id: doc.id
-            });
+
+            // Generate a unique sync ID for this operation
+            const syncId = `sync_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
+
+            // Check if document with same ID already exists
+            const existingDocIndex = prds.findIndex((existingDoc: any) => existingDoc.id === doc.id);
+
+            if (existingDocIndex >= 0) {
+              // Update the existing document with new metadata and syncId
+              prds[existingDocIndex] = {
+                ...prds[existingDocIndex],
+                title: data.documentName,
+                url: `https://docs.google.com/document/d/${doc.id}`,
+                createdAt: new Date().toISOString(),
+                syncId: syncId,
+                id: doc.id
+              };
+              console.log(`Updated existing document "${data.documentName}" in localStorage`);
+            } else {
+              // Add new document
+              prds.push({
+                title: data.documentName,
+                url: `https://docs.google.com/document/d/${doc.id}`,
+                createdAt: new Date().toISOString(),
+                syncId: syncId,
+                id: doc.id
+              });
+              console.log(`Added document "${data.documentName}" to localStorage`);
+            }
+
             localStorage.setItem('prds', JSON.stringify(prds));
 
             return data.documentName;
