@@ -287,7 +287,7 @@ export default function ChatContainer() {
         )}
         
         <form onSubmit={handleSubmit} className="relative">
-          <div className="absolute -inset-[1px] bg-gradient-to-r from-purple-500 via-pink-500 to-blue-500 rounded-[14px] opacity-70 blur-[1px] animate-rainbow-pulse"></div>
+          <div className="absolute -inset-[2px] bg-gradient-to-r from-purple-500 via-pink-500 to-blue-500 rounded-[14px] opacity-75 blur-[3px] animate-rainbow-pulse"></div>
           <div className="relative">
             <Textarea
               ref={inputRef}

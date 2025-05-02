@@ -63,24 +63,24 @@ module.exports = {
         rainbowPulse: {
           '0%': { 
             backgroundPosition: '0% 50%',
-            opacity: '0.6'
+            opacity: '0.7'
           },
           '50%': { 
             backgroundPosition: '100% 50%',
-            opacity: '0.8'
+            opacity: '0.9'
           },
           '100%': {
             backgroundPosition: '0% 50%',
-            opacity: '0.6'
+            opacity: '0.7'
           }
         },
         borderGlow: {
           '0%, 100%': { 
-            boxShadow: '0 0 5px rgba(66, 153, 225, 0.5)',
+            boxShadow: '0 0 10px rgba(66, 153, 225, 0.6)',
             borderColor: 'rgba(66, 153, 225, 0.8)'
           },
           '50%': { 
-            boxShadow: '0 0 15px rgba(236, 72, 153, 0.7)',
+            boxShadow: '0 0 20px rgba(236, 72, 153, 0.8)',
             borderColor: 'rgba(236, 72, 153, 0.8)'
           }
         },
