@@ -9,7 +9,7 @@ export const runtime = 'edge';
 
 // Initialize Slack client
 console.log('[WORKER_INIT] Initializing Slack WebClient');
-const webClient = new WebClient(process.env.SLACK_BOT_TOKEN);
+const webClient = new WebClient(process.env.SLACK_BOT_TOKEN || '');
 console.log('[WORKER_INIT] WebClient initialized');
 
 // Process a job from the queue

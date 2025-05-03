@@ -5,7 +5,7 @@ import { enqueueSlackMessage } from '@/lib/jobQueue';
 
 // Initialize Slack client
 console.log('[SLACK_INIT] Initializing Slack WebClient');
-const webClient = new WebClient(process.env.SLACK_BOT_TOKEN);
+const webClient = new WebClient(process.env.SLACK_BOT_TOKEN || '');
 console.log('[SLACK_INIT] WebClient initialized');
 
 // Cache for bot ID
