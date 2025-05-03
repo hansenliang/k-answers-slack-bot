@@ -162,25 +162,33 @@ async function triggerNextWorker(request: Request) {
   try {
     // Get deployment URL
     const baseUrl = getDeploymentUrl(request);
+    const workerSecretKey = process.env.WORKER_SECRET_KEY || '';
     
     if (!baseUrl) {
       console.error('[WORKER] Cannot trigger next worker: No deployment URL found');
       return;
     }
     
-    console.log('[WORKER] Triggering next worker execution');
+    if (!workerSecretKey) {
+      console.error('[WORKER] Cannot trigger next worker: No worker secret key found');
+      return;
+    }
+    
+    console.log(`[WORKER] Triggering next worker at ${baseUrl}/api/slack/rag-worker`);
     
     // Fire and forget - don't await the result
-    fetch(`${baseUrl}/api/slack/rag-worker?key=${process.env.WORKER_SECRET_KEY}&chain=true`, {
+    fetch(`${baseUrl}/api/slack/rag-worker?key=${workerSecretKey}&chain=true`, {
       method: 'POST',
       headers: {
-        'Content-Type': 'application/json'
-      }
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${workerSecretKey}`
+      },
+      body: JSON.stringify({ type: 'chain_trigger' })  // Add a simple payload
     }).catch(error => {
       console.error('[WORKER] Failed to trigger next worker:', error);
     });
     
-    console.log('[WORKER] Next worker triggered successfully');
+    console.log('[WORKER] Next worker trigger request sent');
   } catch (error) {
     console.error('[WORKER] Error triggering next worker:', error);
   }
@@ -203,17 +211,53 @@ async function handleWorkerRequest(request: Request) {
   try {
     const startTime = Date.now();
     const url = new URL(request.url);
-    const key = url.searchParams.get('key');
+    
+    // Get authorization from multiple sources
+    const queryKey = url.searchParams.get('key');
+    const authHeader = request.headers.get('Authorization');
+    const bearerToken = authHeader?.startsWith('Bearer ') ? authHeader.substring(7) : null;
+    
     const isChained = url.searchParams.get('chain') === 'true';
     const isCronJob = request.headers.get('x-vercel-cron') === 'true';
     const isSlackEvent = request.headers.get('X-Slack-Event') === 'true';
     
-    console.log(`[WORKER] Request type: ${isCronJob ? 'Vercel cron' : isChained ? 'Chained call' : isSlackEvent ? 'Slack event' : 'External call'}, has key: ${!!key}`);
+    const expectedKey = process.env.WORKER_SECRET_KEY || '';
     
-    // If it's not authorized, reject the request
-    if (!isCronJob && key !== process.env.WORKER_SECRET_KEY) {
-      console.error('[WORKER] Unauthorized access attempt');
+    // Log auth details (but protect the full key)
+    console.log(`[WORKER] Auth details: Query key present: ${!!queryKey}, Bearer token present: ${!!bearerToken}, Expected key present: ${!!expectedKey}`);
+    console.log(`[WORKER] Request type: ${isCronJob ? 'Vercel cron' : isChained ? 'Chained call' : isSlackEvent ? 'Slack event' : 'External call'}`);
+    
+    // Check authorization - accept either query param or bearer token
+    const isAuthorized = isCronJob || 
+                         (queryKey && queryKey === expectedKey) || 
+                         (bearerToken && bearerToken === expectedKey);
+    
+    if (!isAuthorized) {
+      console.error('[WORKER] Unauthorized access attempt. Check WORKER_SECRET_KEY environment variable.');
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    }
+    
+    // Check Redis connection before proceeding
+    try {
+      // Create a test Redis connection to validate configuration
+      const redis = new Redis({
+        url: process.env.UPSTASH_REDIS_URL || '',
+        token: process.env.UPSTASH_REDIS_TOKEN || '',
+      });
+      
+      // Log Redis config for debugging (without exposing full credentials)
+      console.log(`[WORKER] Redis config: URL ${process.env.UPSTASH_REDIS_URL ? 'present' : 'missing'}, token ${process.env.UPSTASH_REDIS_TOKEN ? 'present' : 'missing'}`);
+      
+      // Test Redis connection by getting a simple value
+      await redis.ping();
+      console.log(`[WORKER] Redis connection test successful`);
+    } catch (redisError) {
+      console.error('[WORKER] Redis connection test failed:', redisError);
+      return NextResponse.json({ 
+        status: 'error',
+        message: 'Redis configuration error',
+        error: redisError instanceof Error ? redisError.message : String(redisError)
+      }, { status: 500 });
     }
     
     // Get a job from the queue

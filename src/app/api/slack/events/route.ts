@@ -369,12 +369,17 @@ export async function POST(request: Request) {
         const workerUrl = new URL(request.url);
         workerUrl.pathname = '/api/slack/rag-worker';
         
+        // Ensure the worker secret key is properly included both in URL and headers
+        const workerSecretKey = process.env.WORKER_SECRET_KEY || '';
+        console.log(`[SLACK_POST] Triggering worker with key present: ${!!workerSecretKey}`);
+        
         // Trigger the worker without waiting for it to complete
-        fetch(`${workerUrl.origin}/api/slack/rag-worker?key=${process.env.WORKER_SECRET_KEY}`, {
+        fetch(`${workerUrl.origin}/api/slack/rag-worker?key=${workerSecretKey}`, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
-            'X-Slack-Event': 'true'
+            'X-Slack-Event': 'true',
+            'Authorization': `Bearer ${workerSecretKey}`
           },
           body: rawBody  // Forward the original Slack event
         }).catch(error => {
