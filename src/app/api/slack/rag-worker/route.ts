@@ -4,8 +4,8 @@ import { slackMessageQueue } from '@/lib/jobQueue';
 import { queryRag } from '@/lib/rag';
 import { SlackMessageJob } from '@/lib/jobQueue';
 
-// Define the runtime as edge to avoid timeout issues
-export const runtime = 'edge';
+// Define the runtime as nodejs to support fs, path, and other Node.js core modules
+export const runtime = 'nodejs';
 
 // Initialize Slack client
 console.log('[WORKER_INIT] Initializing Slack WebClient');

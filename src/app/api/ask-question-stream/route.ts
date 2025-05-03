@@ -3,6 +3,9 @@ import OpenAI from 'openai';
 import { getAuthServerSession } from '@/lib/auth';
 import { queryAllIndices } from '@/lib/shared-pinecone';
 
+// Use Node.js runtime for Pinecone compatibility
+export const runtime = 'nodejs';
+
 // Initialize OpenAI
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,

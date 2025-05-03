@@ -1,3 +1,6 @@
+// Add Node.js runtime declaration at the top of the file
+export const runtime = 'nodejs';
+
 import { NextResponse } from 'next/server';
 import { google } from 'googleapis';
 import { OAuth2Client } from 'google-auth-library';

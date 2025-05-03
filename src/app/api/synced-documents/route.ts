@@ -1,3 +1,6 @@
+// Add Node.js runtime declaration at the top of the file
+export const runtime = 'nodejs';
+
 import { NextResponse } from 'next/server';
 import { getAuthServerSession } from '@/lib/auth';
 import { getUserIndex } from '@/lib/pinecone';

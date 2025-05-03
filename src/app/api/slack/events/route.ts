@@ -4,6 +4,9 @@ import { createHmac, timingSafeEqual } from 'crypto';
 import { enqueueSlackMessage } from '@/lib/jobQueue';
 import { queryRag } from '@/lib/rag';
 
+// Set runtime to nodejs to support Node.js built-in modules
+export const runtime = 'nodejs';
+
 // Initialize Slack client
 console.log('[SLACK_INIT] Initializing Slack WebClient');
 const webClient = new WebClient(process.env.SLACK_BOT_TOKEN || '');
