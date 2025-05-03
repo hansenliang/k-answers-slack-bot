@@ -10,9 +10,21 @@ export const runtime = 'nodejs';
 const slackClient = new WebClient(process.env.SLACK_BOT_TOKEN || '');
 
 // Initialize Redis client
+const redisUrl = process.env.UPSTASH_REDIS_URL || '';
+const redisToken = process.env.UPSTASH_REDIS_TOKEN || '';
+
+// Validate and fix URL format
+let validRedisUrl = redisUrl;
+if (!redisUrl.startsWith('https://') && redisUrl.includes('.upstash.io')) {
+  validRedisUrl = `https://${redisUrl.replace(/^[\/]*/, '')}`;
+  console.log(`[DIAGNOSTIC] Fixed Redis URL to include https:// protocol`);
+} else if (!redisUrl.startsWith('https://') && redisUrl) {
+  console.error(`[DIAGNOSTIC] Warning: Redis URL format may be invalid: ${redisUrl.substring(0, 8)}...`);
+}
+
 const redis = new Redis({
-  url: process.env.UPSTASH_REDIS_URL || '',
-  token: process.env.UPSTASH_REDIS_TOKEN || '',
+  url: validRedisUrl,
+  token: redisToken,
 });
 
 // Get the deployment URL from environment variables

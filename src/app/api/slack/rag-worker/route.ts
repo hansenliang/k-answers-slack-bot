@@ -240,37 +240,66 @@ async function handleWorkerRequest(request: Request) {
     // Check Redis connection before proceeding
     try {
       // Create a test Redis connection to validate configuration
-      const redis = new Redis({
-        url: process.env.UPSTASH_REDIS_URL || '',
-        token: process.env.UPSTASH_REDIS_TOKEN || '',
-      });
+      const redisUrl = process.env.UPSTASH_REDIS_URL || '';
+      const redisToken = process.env.UPSTASH_REDIS_TOKEN || '';
       
       // Log Redis config for debugging (without exposing full credentials)
-      console.log(`[WORKER] Redis config: URL ${process.env.UPSTASH_REDIS_URL ? 'present' : 'missing'}, token ${process.env.UPSTASH_REDIS_TOKEN ? 'present' : 'missing'}`);
+      console.log(`[WORKER] Redis config: URL ${redisUrl ? 'present' : 'missing'}, token ${redisToken ? 'present' : 'missing'}`);
+      
+      // Validate and fix URL format
+      let validRedisUrl = redisUrl;
+      if (!redisUrl.startsWith('https://') && redisUrl.includes('.upstash.io')) {
+        validRedisUrl = `https://${redisUrl.replace(/^[\/]*/, '')}`;
+        console.log(`[WORKER] Fixed Redis URL format to include https:// protocol`);
+      } else if (!redisUrl.startsWith('https://')) {
+        console.error(`[WORKER] Invalid Redis URL format: does not start with https://`);
+      }
+      
+      const redis = new Redis({
+        url: validRedisUrl,
+        token: redisToken,
+      });
       
       // Test Redis connection by getting a simple value
       await redis.ping();
       console.log(`[WORKER] Redis connection test successful`);
     } catch (redisError) {
       console.error('[WORKER] Redis connection test failed:', redisError);
+      if (redisError instanceof Error) {
+        console.error(`[WORKER] Error details: ${redisError.message}`);
+        if ('cause' in redisError) {
+          console.error(`[WORKER] Error cause:`, redisError.cause);
+        }
+      }
       return NextResponse.json({ 
         status: 'error',
         message: 'Redis configuration error',
-        error: redisError instanceof Error ? redisError.message : String(redisError)
+        error: redisError instanceof Error ? redisError.message : String(redisError),
+        hint: 'Ensure UPSTASH_REDIS_URL starts with https:// and is in the correct format'
       }, { status: 500 });
     }
     
     // Get a job from the queue
     console.log('[WORKER] Attempting to receive message from queue');
-    const message = await slackMessageQueue.receiveMessage<SlackMessageJob>();
-    
-    if (!message) {
-      console.log('[WORKER] No messages in queue to process');
-      return NextResponse.json({ status: 'no_jobs' });
+    let message;
+    try {
+      message = await slackMessageQueue.receiveMessage<SlackMessageJob>();
+      
+      if (!message) {
+        console.log('[WORKER] No messages in queue to process');
+        return NextResponse.json({ status: 'no_jobs' });
+      }
+      
+      const jobId = `${message.body.userId}-${message.body.eventTs.substring(0, 8)}`;
+      console.log(`[WORKER] Retrieved message from queue: ${JSON.stringify(message.body)}, stream ID: ${message.streamId}`);
+    } catch (queueError) {
+      console.error('[WORKER] Failed to retrieve message from queue:', queueError);
+      return NextResponse.json({ 
+        status: 'error',
+        message: 'Failed to access job queue',
+        error: queueError instanceof Error ? queueError.message : String(queueError)
+      }, { status: 500 });
     }
-    
-    const jobId = `${message.body.userId}-${message.body.eventTs.substring(0, 8)}`;
-    console.log(`[WORKER] Retrieved message from queue: ${JSON.stringify(message.body)}, stream ID: ${message.streamId}`);
     
     // Process the job
     console.log(`[WORKER:${jobId}] Starting job processing`);
