@@ -1,8 +1,1 @@
-{
-  "crons": [
-    {
-      "path": "/api/slack/rag-worker",
-      "schedule": "0 */12 * * *"
-    }
-  ]
-} 
+{} 
