@@ -186,13 +186,29 @@ const handleAppMention = async (event: any) => {
       thread_ts: threadTs,
     });
 
-    // Process the question in the background without waiting for it to complete
-    console.log(`[APP_MENTION] Starting background processing for user ${userId}`);
-    processQuestion(questionText, channelId, threadTs).catch(error => {
-      console.error('[APP_MENTION] Background processing error:', error);
-    });
-
-    console.log(`[APP_MENTION] Successfully initiated background processing for ${userId}`);
+    // Enqueue the job for background processing instead of processing inline
+    console.log(`[APP_MENTION] Enqueueing job for user ${userId}`);
+    const job = {
+      channelId,
+      userId,
+      questionText,
+      threadTs,
+      eventTs: event.event_ts
+    };
+    
+    const enqueued = await enqueueSlackMessage(job);
+    
+    if (enqueued) {
+      console.log(`[APP_MENTION] Successfully enqueued job for ${userId}`);
+    } else {
+      console.error(`[APP_MENTION] Failed to enqueue job for ${userId}`);
+      // Send failure notification to user
+      await webClient.chat.postMessage({
+        channel: channelId,
+        text: "I encountered an error while processing your request. Please try again later.",
+        thread_ts: threadTs,
+      });
+    }
   } catch (error) {
     console.error('[APP_MENTION] Error handling app_mention event:', error);
     try {
@@ -262,13 +278,29 @@ const handleDirectMessage = async (event: any) => {
       thread_ts: event.thread_ts,
     });
 
-    // Process the question in the background without waiting for it to complete
-    console.log(`[DIRECT_MSG] Starting background processing for user ${userId}`);
-    processQuestion(questionText, channelId, event.thread_ts).catch(error => {
-      console.error('[DIRECT_MSG] Background processing error:', error);
-    });
-
-    console.log(`[DIRECT_MSG] Successfully initiated background processing for ${userId}`);
+    // Enqueue the job for background processing instead of processing inline
+    console.log(`[DIRECT_MSG] Enqueueing job for user ${userId}`);
+    const job = {
+      channelId,
+      userId,
+      questionText,
+      threadTs: event.thread_ts,
+      eventTs: event.event_ts
+    };
+    
+    const enqueued = await enqueueSlackMessage(job);
+    
+    if (enqueued) {
+      console.log(`[DIRECT_MSG] Successfully enqueued job for ${userId}`);
+    } else {
+      console.error(`[DIRECT_MSG] Failed to enqueue job for ${userId}`);
+      // Send failure notification to user
+      await webClient.chat.postMessage({
+        channel: channelId,
+        text: "I encountered an error while processing your request. Please try again later.",
+        thread_ts: event.thread_ts,
+      });
+    }
   } catch (error) {
     console.error('[DIRECT_MSG] Error handling direct message event:', error);
     try {
@@ -283,73 +315,6 @@ const handleDirectMessage = async (event: any) => {
     }
   }
 };
-
-// Process a question in the background
-async function processQuestion(questionText: string, channelId: string, threadTs?: string): Promise<void> {
-  try {
-    console.log(`[PROCESS_Q] Processing question: "${questionText}"`);
-    
-    // Use a timeout to ensure the response doesn't get lost even if the 
-    // serverless function times out. This effectively gives extra time.
-    const timeoutPromise = new Promise<string>((resolve) => {
-      setTimeout(() => {
-        resolve("I'm still working on your question. Please wait a bit longer.");
-      }, 5000); // 5 seconds
-    });
-    
-    // Start the RAG query
-    console.log(`[PROCESS_Q] Calling queryRag`);
-    const ragPromise = queryRag(questionText);
-    
-    // Race between the timeout and the actual query
-    const firstResponse = await Promise.race([timeoutPromise, ragPromise]);
-    
-    // If the first response is the timeout message, send it
-    if (firstResponse === "I'm still working on your question. Please wait a bit longer.") {
-      console.log(`[PROCESS_Q] Sending interim response while continuing to process`);
-      await webClient.chat.postMessage({
-        channel: channelId,
-        text: firstResponse,
-        thread_ts: threadTs,
-      });
-      
-      // Continue processing and send the final response when done
-      console.log(`[PROCESS_Q] Continuing to wait for final response`);
-      const finalAnswer = await ragPromise;
-      console.log(`[PROCESS_Q] Got final answer, sending response`);
-      
-      await webClient.chat.postMessage({
-        channel: channelId,
-        text: finalAnswer,
-        thread_ts: threadTs,
-      });
-    } else {
-      // The RAG query completed before the timeout, so send the response
-      console.log(`[PROCESS_Q] Sending final response directly`);
-      await webClient.chat.postMessage({
-        channel: channelId,
-        text: firstResponse,
-        thread_ts: threadTs,
-      });
-    }
-    
-    console.log(`[PROCESS_Q] Successfully processed question and sent response`);
-  } catch (error) {
-    console.error('[PROCESS_Q] Error processing question:', error);
-    
-    // Send error message to the user
-    try {
-      await webClient.chat.postMessage({
-        channel: channelId,
-        text: "I encountered an error while processing your question. Please try again later.",
-        thread_ts: threadTs,
-      });
-      console.log(`[PROCESS_Q] Sent error notification`);
-    } catch (postError) {
-      console.error('[PROCESS_Q] Failed to send error message:', postError);
-    }
-  }
-}
 
 // Main request handler
 export async function POST(request: Request) {
