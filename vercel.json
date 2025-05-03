@@ -1,7 +1,7 @@
 {
   "crons": [
     {
-      "path": "/api/slack/rag-worker?key=$WORKER_SECRET_KEY",
+      "path": "/api/slack/rag-worker",
       "schedule": "*/5 * * * *"
     }
   ]

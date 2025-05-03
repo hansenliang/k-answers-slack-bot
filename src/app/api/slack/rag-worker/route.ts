@@ -57,11 +57,14 @@ export async function GET(request: Request) {
   console.log('[WORKER] Worker endpoint called');
   
   try {
-    // Check for a secret key to prevent unauthorized access
+    // For cron jobs from Vercel, we can rely on the fact that they are internal
+    // and skip the authentication check
     const url = new URL(request.url);
     const key = url.searchParams.get('key');
+    const isCronJob = request.headers.get('x-vercel-cron') === 'true';
     
-    if (key !== process.env.WORKER_SECRET_KEY) {
+    // If it's not a cron job and the key doesn't match, reject the request
+    if (!isCronJob && key !== process.env.WORKER_SECRET_KEY) {
       console.error('[WORKER] Unauthorized access attempt');
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
     }
