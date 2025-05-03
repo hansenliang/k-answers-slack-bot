@@ -1,12 +1,34 @@
 import { NextResponse } from 'next/server';
 import { WebClient } from '@slack/web-api';
 import { createHmac, timingSafeEqual } from 'crypto';
-import { queryRag } from '@/lib/rag';
+import { enqueueSlackMessage } from '@/lib/jobQueue';
 
 // Initialize Slack client
 console.log('[SLACK_INIT] Initializing Slack WebClient');
 const webClient = new WebClient(process.env.SLACK_BOT_TOKEN);
 console.log('[SLACK_INIT] WebClient initialized');
+
+// Cache for bot ID
+let botUserIdCache: string | null = null;
+
+// Get bot user ID (with caching)
+const getBotUserId = async (): Promise<string> => {
+  console.log('[SLACK_AUTH] Getting bot user ID');
+  if (botUserIdCache) {
+    console.log(`[SLACK_AUTH] Using cached bot ID: ${botUserIdCache}`);
+    return botUserIdCache;
+  }
+
+  try {
+    const botInfo = await webClient.auth.test();
+    botUserIdCache = botInfo.user_id as string;
+    console.log(`[SLACK_AUTH] Got and cached bot ID: ${botUserIdCache}`);
+    return botUserIdCache;
+  } catch (error) {
+    console.error('[SLACK_AUTH] Failed to get bot ID:', error);
+    throw error;
+  }
+};
 
 // Rate limiting data store
 interface RateLimitData {
@@ -134,8 +156,7 @@ const handleAppMention = async (event: any) => {
 
     // Extract message text (remove the @mention part)
     console.log(`[APP_MENTION] Getting bot info to extract mention`);
-    const botInfo = await webClient.auth.test();
-    const botUserId = botInfo.user_id;
+    const botUserId = await getBotUserId();
     console.log(`[APP_MENTION] Bot user ID: ${botUserId}`);
     
     const mentionTag = `<@${botUserId}>`;
@@ -153,23 +174,25 @@ const handleAppMention = async (event: any) => {
       return;
     }
 
-    // Log the query
-    console.log(`[APP_MENTION] Processing query from user ${userId}: "${questionText}"`);
+    // Enqueue message for processing instead of processing it directly
+    console.log(`[APP_MENTION] Enqueueing message for user ${userId}`);
+    await enqueueSlackMessage({
+      userId,
+      channelId,
+      questionText,
+      threadTs,
+      eventTs: event.event_ts,
+    });
 
-    // Query the RAG system
-    console.log(`[APP_MENTION] Calling queryRag for user ${userId}`);
-    const answer = await queryRag(questionText);
-    console.log(`[APP_MENTION] Received answer from queryRag for user ${userId}`);
-
-    // Reply in the thread
-    console.log(`[APP_MENTION] Sending response to user ${userId} in channel ${channelId}, thread ${threadTs}`);
+    // Send acknowledgment to user
+    console.log(`[APP_MENTION] Sending acknowledgment to user ${userId}`);
     await webClient.chat.postMessage({
       channel: channelId,
-      text: answer,
+      text: "I'm processing your question. I'll get back to you shortly.",
       thread_ts: threadTs,
     });
 
-    console.log(`[APP_MENTION] Successfully sent response to user ${userId} in channel ${channelId}`);
+    console.log(`[APP_MENTION] Successfully enqueued message for user ${userId}`);
   } catch (error) {
     console.error('[APP_MENTION] Error handling app_mention event:', error);
     try {
@@ -231,23 +254,25 @@ const handleDirectMessage = async (event: any) => {
       return;
     }
 
-    // Log the query
-    console.log(`[DIRECT_MSG] Processing DM from user ${userId}: "${questionText}"`);
+    // Enqueue message for processing instead of processing it directly
+    console.log(`[DIRECT_MSG] Enqueueing message for user ${userId}`);
+    await enqueueSlackMessage({
+      userId,
+      channelId,
+      questionText,
+      threadTs: event.thread_ts,
+      eventTs: event.event_ts,
+    });
 
-    // Query the RAG system
-    console.log(`[DIRECT_MSG] Calling queryRag for user ${userId}`);
-    const answer = await queryRag(questionText);
-    console.log(`[DIRECT_MSG] Received answer from queryRag for user ${userId}`);
-
-    // Reply in the DM
-    console.log(`[DIRECT_MSG] Sending response to user ${userId} in DM channel ${channelId}`);
+    // Send acknowledgment to user
+    console.log(`[DIRECT_MSG] Sending acknowledgment to user ${userId}`);
     await webClient.chat.postMessage({
       channel: channelId,
-      text: answer,
+      text: "I'm processing your question. I'll get back to you shortly.",
       thread_ts: event.thread_ts,
     });
 
-    console.log(`[DIRECT_MSG] Successfully sent response to user ${userId} in DM`);
+    console.log(`[DIRECT_MSG] Successfully enqueued message for user ${userId}`);
   } catch (error) {
     console.error('[DIRECT_MSG] Error handling direct message event:', error);
     try {
