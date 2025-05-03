@@ -357,30 +357,50 @@ export async function POST(request: Request) {
       // Handle events according to their type
       const event = body.event;
       
-      switch (event.type) {
-        case 'app_mention':
-          console.log('[SLACK_POST] Handling app_mention event');
-          // Process in background without waiting for response
+      // Trigger handlers in the background without blocking the response
+      if (event.type === 'app_mention' || event.type === 'message') {
+        // Prepare the response first
+        const response = NextResponse.json({ ok: true });
+        
+        // After preparing the response, start a background process to handle the event
+        console.log('[SLACK_POST] Starting background processing after response');
+        
+        // Use a background fetch to trigger the worker
+        const workerUrl = new URL(request.url);
+        workerUrl.pathname = '/api/slack/rag-worker';
+        
+        // Trigger the worker without waiting for it to complete
+        fetch(`${workerUrl.origin}/api/slack/rag-worker?key=${process.env.WORKER_SECRET_KEY}`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Slack-Event': 'true'
+          },
+          body: rawBody  // Forward the original Slack event
+        }).catch(error => {
+          console.error('[SLACK_POST] Failed to trigger worker:', error);
+        });
+        
+        // Process the event synchronously to enqueue it
+        if (event.type === 'app_mention') {
           handleAppMention(event).catch(error => 
             console.error('[SLACK_POST] Async error in app_mention handler:', error)
           );
-          break;
-          
-        case 'message':
-          console.log('[SLACK_POST] Handling message event');
-          // Process direct messages in background
+        } else if (event.type === 'message') {
           handleDirectMessage(event).catch(error => 
             console.error('[SLACK_POST] Async error in direct message handler:', error)
           );
-          break;
-          
-        default:
-          console.log(`[SLACK_POST] Ignoring unsupported event type: ${event.type}`);
+        }
+        
+        // Immediately respond to Slack to acknowledge receipt
+        console.log('[SLACK_POST] Sending acknowledge response to Slack');
+        return response;
+      } else {
+        console.log(`[SLACK_POST] Ignoring unsupported event type: ${event.type}`);
+        // Immediately respond to Slack to acknowledge receipt
+        console.log('[SLACK_POST] Sending acknowledge response to Slack');
+        return NextResponse.json({ ok: true });
       }
-      
-      // Immediately respond to Slack to acknowledge receipt
-      console.log('[SLACK_POST] Sending acknowledge response to Slack');
-      return NextResponse.json({ ok: true });
     }
     
     // Handle other event types or return an error

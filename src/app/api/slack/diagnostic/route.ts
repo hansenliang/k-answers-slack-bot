@@ -15,6 +15,28 @@ const redis = new Redis({
   token: process.env.UPSTASH_REDIS_TOKEN || '',
 });
 
+// Get the deployment URL from environment variables
+function getDeploymentUrl(request: Request): string {
+  // First try explicit environment variables
+  if (process.env.DEPLOYMENT_URL) {
+    return process.env.DEPLOYMENT_URL;
+  }
+  
+  // Then try Vercel-specific environment variables
+  if (process.env.VERCEL_URL) {
+    return `https://${process.env.VERCEL_URL}`;
+  }
+  
+  // Try to extract from the request
+  try {
+    const url = new URL(request.url);
+    return `${url.protocol}//${url.host}`;
+  } catch (e) {
+    console.error('Could not extract deployment URL from request:', e);
+    return '';
+  }
+}
+
 export async function GET(request: Request) {
   try {
     const url = new URL(request.url);
@@ -61,6 +83,7 @@ export async function GET(request: Request) {
       hasPinecone: !!process.env.PINECONE_API_KEY,
       hasUpstashRedis: !!process.env.UPSTASH_REDIS_URL && !!process.env.UPSTASH_REDIS_TOKEN,
       hasWorkerSecret: !!process.env.WORKER_SECRET_KEY,
+      deploymentUrl: getDeploymentUrl(request)
     };
     
     // Return diagnostic information
@@ -80,7 +103,8 @@ export async function GET(request: Request) {
       environment: envInfo,
       runtime: {
         version: process.version,
-        platform: process.platform
+        platform: process.platform,
+        maxDuration: 60 // Configured limit
       }
     });
   } catch (error) {
