@@ -2,9 +2,11 @@ import OpenAI from 'openai';
 import { queryAllIndices } from './shared-pinecone';
 
 // Initialize OpenAI
+console.log('[RAG_INIT] Setting up OpenAI client');
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
+console.log('[RAG_INIT] OpenAI client ready');
 
 /**
  * Query the RAG system with a given text
@@ -12,34 +14,69 @@ const openai = new OpenAI({
  * @returns The AI-generated answer
  */
 export async function queryRag(text: string): Promise<string> {
+  console.log('[RAG_QUERY] Starting RAG query process');
+  const startTime = Date.now();
   try {
-    console.log(`[DEBUG] Processing text for RAG: "${text}"`);
+    console.log(`[RAG_QUERY] Processing input text: "${text}"`);
 
     // Generate embedding for the text
-    const embeddingResponse = await openai.embeddings.create({
-      model: 'text-embedding-3-small',
-      input: text,
-    });
+    console.log(`[RAG_QUERY] Generating embedding using OpenAI embedding model`);
+    const embeddingStartTime = Date.now();
+    let embeddingResponse;
+    try {
+      embeddingResponse = await openai.embeddings.create({
+        model: 'text-embedding-3-small',
+        input: text,
+      });
+      console.log(`[RAG_QUERY] Embedding generated successfully in ${Date.now() - embeddingStartTime}ms`);
+    } catch (embeddingError) {
+      console.error(`[RAG_QUERY] Failed to generate embedding:`, embeddingError);
+      throw embeddingError;
+    }
 
     const queryEmbedding = embeddingResponse.data[0].embedding;
-    console.log(`[DEBUG] Generated embedding for query`);
+    console.log(`[RAG_QUERY] Embedding vector created with dimension: ${queryEmbedding.length}`);
 
     // Query across all indices using the shared index
-    const queryResults = await queryAllIndices(queryEmbedding, 5);
+    console.log(`[RAG_QUERY] Querying Pinecone index with embedding`);
+    const pineconeStartTime = Date.now();
+    let queryResults;
+    try {
+      queryResults = await queryAllIndices(queryEmbedding, 5);
+      console.log(`[RAG_QUERY] Pinecone query completed in ${Date.now() - pineconeStartTime}ms`);
+    } catch (pineconeError) {
+      console.error(`[RAG_QUERY] Failed to query Pinecone:`, pineconeError);
+      throw pineconeError;
+    }
     
-    console.log(`[DEBUG] Retrieved ${queryResults.matches?.length || 0} matches from shared index`);
+    const matchCount = queryResults.matches?.length || 0;
+    console.log(`[RAG_QUERY] Retrieved ${matchCount} matches from shared index`);
     
     // Extract content from matches
-    const contexts = queryResults.matches
-      ?.filter(match => match.score && match.score > 0.5)
-      .map(match => match.metadata?.text as string)
-      .filter(Boolean) || [];
+    const matches = queryResults.matches || [];
+    console.log(`[RAG_QUERY] Processing ${matches.length} matches, filtering by score > 0.5`);
+    
+    const contextsWithScores = matches
+      .map(match => ({
+        text: match.metadata?.text as string,
+        score: match.score || 0
+      }))
+      .filter(item => item.score > 0.5);
+    
+    console.log(`[RAG_QUERY] After filtering, ${contextsWithScores.length} contexts remain`);
+    
+    // Log match scores for debugging
+    if (contextsWithScores.length > 0) {
+      console.log(`[RAG_QUERY] Match scores: ${contextsWithScores.map(c => c.score.toFixed(3)).join(', ')}`);
+    }
+    
+    const contexts = contextsWithScores.map(item => item.text).filter(Boolean);
 
     // Prepare system prompt based on whether we have relevant contexts
     let systemPrompt = '';
     
     if (contexts.length === 0) {
-      console.log(`[DEBUG] No relevant contexts found, using general knowledge prompt`);
+      console.log(`[RAG_QUERY] No relevant contexts found, using general knowledge prompt`);
       systemPrompt = `You are a helpful assistant that answers questions about Klaviyo and its products.
       
       The user is asking about Klaviyo's products, features, or services. If you know the answer, provide it helpfully and concisely.
@@ -53,7 +90,7 @@ export async function queryRag(text: string): Promise<string> {
     } else {
       // Combine the contexts 
       const combinedContext = contexts.join('\n\n');
-      console.log(`[DEBUG] Using ${contexts.length} context chunks for answer generation`);
+      console.log(`[RAG_QUERY] Using ${contexts.length} context chunks for answer generation, total length: ${combinedContext.length} chars`);
       
       systemPrompt = `You are a helpful assistant that answers questions based on the provided context.
       
@@ -75,22 +112,33 @@ export async function queryRag(text: string): Promise<string> {
     }
 
     // Generate an answer using OpenAI
-    const completion = await openai.chat.completions.create({
-      model: 'gpt-4o-mini',
-      messages: [
-        { role: 'system', content: systemPrompt },
-        { role: 'user', content: text }
-      ],
-      temperature: 0.3,
-      max_tokens: 1000,
-    });
+    console.log(`[RAG_QUERY] Generating answer using OpenAI GPT model`);
+    const completionStartTime = Date.now();
+    let completion;
+    try {
+      completion = await openai.chat.completions.create({
+        model: 'gpt-4o-mini',
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: text }
+        ],
+        temperature: 0.3,
+        max_tokens: 1000,
+      });
+      console.log(`[RAG_QUERY] OpenAI completion generated in ${Date.now() - completionStartTime}ms`);
+    } catch (completionError) {
+      console.error(`[RAG_QUERY] Failed to generate completion:`, completionError);
+      throw completionError;
+    }
 
     const answer = completion.choices[0].message.content || "I couldn't generate an answer. Please try again.";
-    console.log(`[DEBUG] Generated answer successfully`);
+    console.log(`[RAG_QUERY] Generated answer of length: ${answer.length} chars`);
+    console.log(`[RAG_QUERY] Total RAG process completed in ${Date.now() - startTime}ms`);
 
     return answer;
   } catch (error) {
-    console.error('[ERROR] Failed to process RAG query:', error);
+    console.error('[RAG_QUERY] Failed to process RAG query:', error);
+    console.log(`[RAG_QUERY] Error occurred after ${Date.now() - startTime}ms`);
     return "I'm sorry, I encountered an issue while processing your question. Please try again later.";
   }
 } 
