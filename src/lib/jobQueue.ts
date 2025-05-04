@@ -82,10 +82,11 @@ export async function enqueueSlackMessage(job: SlackMessageJob): Promise<boolean
       console.error(`[JOB_QUEUE:${jobId}] Failed to get initial queue length:`, lenError);
     }
     
-    // Attempt to send message to queue
-    console.log(`[JOB_QUEUE:${jobId}] Calling slackMessageQueue.sendMessage`);
+    // IMPORTANT: Always use the Queue library to ensure proper message format
+    // Never use direct Redis operations (lpush, etc.) to add messages to the queue
+    console.log(`[JOB_QUEUE:${jobId}] Calling slackMessageQueue.sendMessage with properly formatted job`);
     const result = await slackMessageQueue.sendMessage(job);
-    console.log(`[JOB_QUEUE:${jobId}] Queue.sendMessage result:`, JSON.stringify(result));
+    console.log(`[JOB_QUEUE:${jobId}] Queue.sendMessage result: ${result}`);
     
     // Verify queue update
     try {

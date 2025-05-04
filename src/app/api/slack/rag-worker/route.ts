@@ -327,26 +327,54 @@ async function handleWorkerRequest(request: Request) {
               const parsedItem = JSON.parse(items[0]);
               console.log('[WORKER] Parsed item structure:', Object.keys(parsedItem));
               
-              // If it has the expected format, process it
-              if (parsedItem.body && typeof parsedItem.body === 'object') {
-                console.log('[WORKER] Item has body property, attempting to process');
+              // If it has the expected format with streamId and body, process it normally
+              if (parsedItem.streamId && parsedItem.body && typeof parsedItem.body === 'object') {
+                console.log('[WORKER] Item has proper format with streamId and body, processing normally');
                 
-                // Create a synthetic message object
+                // Create a synthetic message object matching what Upstash Queue expects
                 message = {
-                  streamId: parsedItem.streamId || `manual-${Date.now()}`,
+                  streamId: parsedItem.streamId,
                   body: parsedItem.body
                 };
                 
                 // Remove the item from the queue
-                console.log('[WORKER] Manually removing item from queue');
+                console.log('[WORKER] Removing properly formatted item from queue');
                 await directRedis.lrem(queueKey, 1, items[0]);
                 
                 console.log('[WORKER] Successfully retrieved message via fallback method');
+              } 
+              // Handle legacy or incorrectly formatted messages 
+              else if (parsedItem.channelId && parsedItem.userId && parsedItem.questionText) {
+                console.log('[WORKER] Found legacy format message, converting to proper format');
+                
+                // It's a direct job object without the wrapper - create proper structure
+                message = {
+                  streamId: `manual-${Date.now()}`,
+                  body: parsedItem // The whole object is the body in this case
+                };
+                
+                // Remove the legacy item from the queue
+                console.log('[WORKER] Removing legacy formatted item from queue');
+                await directRedis.lrem(queueKey, 1, items[0]);
+                
+                console.log('[WORKER] Successfully converted legacy message to proper format');
               } else {
-                console.log('[WORKER] Item does not have expected format:', parsedItem);
+                console.log('[WORKER] Item has invalid format, cannot process:', parsedItem);
+                
+                // Remove the invalid item to prevent queue clogging
+                console.log('[WORKER] Removing invalid item from queue to prevent blocking');
+                await directRedis.lrem(queueKey, 1, items[0]);
+                
+                console.log('[WORKER] Invalid message removed from queue');
               }
             } catch (parseError) {
               console.error('[WORKER] Error parsing queue item:', parseError);
+              
+              // Also remove unparseable items to prevent blocking the queue
+              console.log('[WORKER] Removing unparseable item from queue');
+              await directRedis.lrem(queueKey, 1, items[0]);
+              
+              console.log('[WORKER] Unparseable message removed from queue');
             }
           }
         } catch (directRedisError) {

@@ -531,27 +531,6 @@ export async function POST(request: Request) {
         // After preparing the response, start a background process to handle the event
         console.log('[SLACK_POST] Starting background processing after response');
         
-        // Use a background fetch to trigger the worker
-        const workerUrl = new URL(request.url);
-        workerUrl.pathname = '/api/slack/rag-worker';
-        
-        // Ensure the worker secret key is properly included both in URL and headers
-        const workerSecretKey = process.env.WORKER_SECRET_KEY || '';
-        console.log(`[SLACK_POST] Triggering worker with key present: ${!!workerSecretKey}`);
-        
-        // Trigger the worker without waiting for it to complete
-        fetch(`${workerUrl.origin}/api/slack/rag-worker?key=${workerSecretKey}`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'X-Slack-Event': 'true',
-            'Authorization': `Bearer ${workerSecretKey}`
-          },
-          body: rawBody  // Forward the original Slack event
-        }).catch(error => {
-          console.error('[SLACK_POST] Failed to trigger worker:', error);
-        });
-        
         // Process the event synchronously to enqueue it
         if (event.type === 'app_mention') {
           handleAppMention(event).catch(error => 
@@ -562,6 +541,9 @@ export async function POST(request: Request) {
             console.error('[SLACK_POST] Async error in direct message handler:', error)
           );
         }
+        
+        // DON'T trigger the worker with raw Slack event - the handler functions 
+        // will properly enqueue the message and trigger the worker in the right format
         
         // Immediately respond to Slack to acknowledge receipt
         console.log('[SLACK_POST] Sending acknowledge response to Slack');
