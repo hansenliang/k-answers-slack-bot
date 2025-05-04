@@ -3,6 +3,7 @@ import { WebClient } from '@slack/web-api';
 import { Redis } from '@upstash/redis';
 import { slackMessageQueue, enqueueSlackMessage, SlackMessageJob } from '@/lib/jobQueue';
 import { queryRag } from '@/lib/rag';
+import { SLACK_BOT_TOKEN, validateSlackEnvironment, logEnvironmentStatus } from '@/lib/env';
 
 // Set runtime to nodejs to support Node.js built-in modules
 export const runtime = 'nodejs';
@@ -260,79 +261,82 @@ async function testFullChain(channelId: string, questionText: string, userId: st
   }
 }
 
-export async function GET(request: Request) {
-  try {
-    const url = new URL(request.url);
-    const auth = url.searchParams.get('auth');
-    
-    // Simple auth to prevent unauthorized access
-    if (auth !== process.env.WORKER_SECRET_KEY) {
-      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-    }
-    
-    // Test Slack connectivity
-    let slackStatus = 'unknown';
-    let botInfo = null;
-    let error = null;
-    
-    try {
-      botInfo = await webClient?.auth.test();
-      slackStatus = 'connected';
-    } catch (e) {
-      slackStatus = 'error';
-      error = e instanceof Error ? e.message : String(e);
-    }
+// Diagnostic interface
+interface DiagnosticResult {
+  environment: {
+    status: 'valid' | 'invalid';
+    missing: string[];
+  };
+  botConnection: {
+    status: 'unknown' | 'connected' | 'error';
+    teamName: string;
+    botId: string;
+    error: string | null;
+  };
+  timestamp: string;
+}
 
-    // Get queue status
-    let queueStatus = 'unknown';
-    let queueStats = {};
+// Diagnostic endpoint for testing Slack integration
+export async function GET(): Promise<NextResponse<DiagnosticResult>> {
+  console.log('[SLACK_DIAGNOSTIC] Running Slack API diagnostic');
+  
+  // Log full environment status
+  logEnvironmentStatus();
+  
+  // Check Slack environment variables
+  const slackEnv = validateSlackEnvironment();
+  
+  // Initialize diagnostic results
+  const diagnosticResults: DiagnosticResult = {
+    environment: {
+      status: slackEnv.valid ? 'valid' : 'invalid',
+      missing: slackEnv.missing
+    },
+    botConnection: {
+      status: 'unknown',
+      teamName: '',
+      botId: '',
+      error: null
+    },
+    timestamp: new Date().toISOString()
+  };
+  
+  // If environment is invalid, return early
+  if (!slackEnv.valid) {
+    console.error(`[SLACK_DIAGNOSTIC] Invalid environment: missing ${slackEnv.missing.join(', ')}`);
+    return NextResponse.json(diagnosticResults, { status: 500 });
+  }
+  
+  // Test connection to Slack API
+  try {
+    console.log('[SLACK_DIAGNOSTIC] Testing Slack API connection');
+    const webClient = new WebClient(SLACK_BOT_TOKEN);
     
-    try {
-      const queueInfo = await redis.llen('queue:slack-message-queue:waiting');
-      queueStatus = 'connected';
-      queueStats = {
-        pendingJobs: queueInfo,
-      };
-    } catch (e) {
-      queueStatus = 'error';
-      error = e instanceof Error ? e.message : String(e);
-    }
+    // Get bot and team info
+    const authTest = await webClient.auth.test();
+    console.log('[SLACK_DIAGNOSTIC] Slack API connection successful', authTest);
     
-    // Get environment info
-    const envInfo = {
-      nodeEnv: process.env.NODE_ENV,
-      hasSlackToken: !!process.env.SLACK_BOT_TOKEN,
-      hasOpenAI: !!process.env.OPENAI_API_KEY,
-      hasPinecone: !!process.env.PINECONE_API_KEY,
-      hasUpstashRedis: !!process.env.UPSTASH_REDIS_URL && !!process.env.UPSTASH_REDIS_TOKEN,
-      hasWorkerSecret: !!process.env.WORKER_SECRET_KEY,
-      deploymentUrl: getDeploymentUrl(request)
+    // Update results
+    diagnosticResults.botConnection = {
+      status: 'connected',
+      teamName: authTest.team as string,
+      botId: authTest.user_id as string,
+      error: null
     };
     
-    // Return diagnostic information
-    return NextResponse.json({
-      timestamp: new Date().toISOString(),
-      slack: {
-        status: slackStatus,
-        botId: botInfo?.user_id || null,
-        botName: botInfo?.user || null,
-        team: botInfo?.team || null,
-        error
-      },
-      queue: {
-        status: queueStatus,
-        stats: queueStats
-      },
-      environment: envInfo,
-      runtime: {
-        version: process.version,
-        platform: process.platform,
-        maxDuration: 60 // Configured limit
-      }
-    });
+    return NextResponse.json(diagnosticResults);
   } catch (error) {
-    console.error('[DIAGNOSTIC] Error:', error);
-    return NextResponse.json({ error: 'Internal server error' }, { status: 500 });
+    console.error('[SLACK_DIAGNOSTIC] Slack API connection failed:', error);
+    
+    // Update results with error
+    diagnosticResults.botConnection = {
+      status: 'error',
+      teamName: '',
+      botId: '',
+      error: error instanceof Error ? error.message : 'Unknown error'
+    };
+    
+    return NextResponse.json(diagnosticResults, { status: 500 });
   }
 }
 
