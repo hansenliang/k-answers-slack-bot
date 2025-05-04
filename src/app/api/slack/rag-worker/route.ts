@@ -22,19 +22,21 @@ async function processJob(job: SlackMessageJob): Promise<boolean> {
   const jobId = `${job.userId}-${job.eventTs.substring(0, 8)}`;
   console.log(`[WORKER:${jobId}] Starting to process job for user ${job.userId}, channel ${job.channelId}, text: "${job.questionText.substring(0, 30)}..."`);
   
-  // Set up a timeout for the entire processing
+  // Create a timeout promise outside to avoid variable reference issues
+  const timeoutMs = 55000; // Set to 55 seconds to leave buffer for cleanup
+  let timeoutId: NodeJS.Timeout | undefined;
   const timeoutPromise = new Promise<never>((_, reject) => {
-    const timeoutId = setTimeout(() => {
+    timeoutId = setTimeout(() => {
       reject(new Error('Processing timeout after 55 seconds'));
-    }, 55000); // Set to 55 seconds to leave buffer for cleanup
-    
-    // Clean up the timeout if the promise is resolved before timeout
-    (timeoutPromise as any).cleanup = () => clearTimeout(timeoutId);
+    }, timeoutMs);
   });
+
+  // Set up interim message timeout
+  let waitingMessageTimeoutId: NodeJS.Timeout | null = null;
   
   try {
     // Set up timeout for intermediate message (5 seconds)
-    const waitingMessageTimeoutId = setTimeout(async () => {
+    waitingMessageTimeoutId = setTimeout(async () => {
       try {
         console.log(`[WORKER:${jobId}] Sending interim message as processing is taking time`);
         await webClient.chat.postMessage({
@@ -48,55 +50,40 @@ async function processJob(job: SlackMessageJob): Promise<boolean> {
       }
     }, 5000);
     
-    // Race between the processing and timeout
-    const result = await Promise.race([
-      // The actual processing
-      (async () => {
-        try {
-          // Query the RAG system
-          console.log(`[WORKER:${jobId}] Calling queryRag for message: "${job.questionText}"`);
-          const answer = await queryRag(job.questionText);
-          console.log(`[WORKER:${jobId}] Received answer from queryRag in ${Date.now() - startTime}ms, length: ${answer.length} chars`);
-          
-          // Clear the waiting message timeout
-          clearTimeout(waitingMessageTimeoutId);
-          
-          // Send the response back to the user
-          console.log(`[WORKER:${jobId}] Sending response to user ${job.userId} in channel ${job.channelId}`);
-          const messageResult = await webClient.chat.postMessage({
-            channel: job.channelId,
-            text: answer,
-            thread_ts: job.threadTs,
-          });
-          
-          console.log(`[WORKER:${jobId}] Successfully sent response, message ts: ${messageResult.ts}`);
-          return true;
-        } catch (error) {
-          // Clear the waiting message timeout
-          clearTimeout(waitingMessageTimeoutId);
-          throw error;
-        }
-      })(),
-      timeoutPromise
-    ]);
+    // The actual processing function
+    const processingTask = async (): Promise<boolean> => {
+      try {
+        // Query the RAG system
+        console.log(`[WORKER:${jobId}] Calling queryRag for message: "${job.questionText}"`);
+        const answer = await queryRag(job.questionText);
+        console.log(`[WORKER:${jobId}] Received answer from queryRag in ${Date.now() - startTime}ms, length: ${answer.length} chars`);
+        
+        // Send the response back to the user
+        console.log(`[WORKER:${jobId}] Sending response to user ${job.userId} in channel ${job.channelId}`);
+        const messageResult = await webClient.chat.postMessage({
+          channel: job.channelId,
+          text: answer,
+          thread_ts: job.threadTs,
+        });
+        
+        console.log(`[WORKER:${jobId}] Successfully sent response, message ts: ${messageResult.ts}`);
+        return true;
+      } catch (error) {
+        console.error(`[WORKER:${jobId}] Error in processing task:`, error);
+        throw error;
+      }
+    };
     
-    // Clean up the timeout
-    if ((timeoutPromise as any).cleanup) {
-      (timeoutPromise as any).cleanup();
-    }
+    // Race between the processing and timeout
+    const result = await Promise.race([processingTask(), timeoutPromise]);
     
     return result as boolean;
   } catch (error) {
     console.error(`[WORKER:${jobId}] Error processing job:`, error);
     
-    // Clear the timeout if it exists
-    if ((timeoutPromise as any).cleanup) {
-      (timeoutPromise as any).cleanup();
-    }
-    
     // Check if it's a timeout error
     const isTimeout = error instanceof Error && 
-                     error.message.includes('timeout');
+                      error.message.includes('timeout');
     
     try {
       // Notify the user of the error
@@ -114,6 +101,13 @@ async function processJob(job: SlackMessageJob): Promise<boolean> {
     
     return false;
   } finally {
+    // Clean up any timeouts
+    if (timeoutId) {
+      clearTimeout(timeoutId);
+    }
+    if (waitingMessageTimeoutId) {
+      clearTimeout(waitingMessageTimeoutId);
+    }
     console.log(`[WORKER:${jobId}] Job processing completed in ${Date.now() - startTime}ms`);
   }
 }
