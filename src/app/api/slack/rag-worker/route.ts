@@ -292,6 +292,45 @@ async function handleWorkerRequest(request: Request) {
       
       const jobId = `${message.body.userId}-${message.body.eventTs.substring(0, 8)}`;
       console.log(`[WORKER] Retrieved message from queue: ${JSON.stringify(message.body)}, stream ID: ${message.streamId}`);
+      
+      // Process the job
+      console.log(`[WORKER:${jobId}] Starting job processing`);
+      const success = await processJob(message.body);
+      
+      // Verify the message if processing was successful
+      if (success) {
+        console.log(`[WORKER:${jobId}] Job processed successfully, verifying message`);
+        try {
+          await slackMessageQueue.verifyMessage(message.streamId);
+          console.log(`[WORKER:${jobId}] Message verified successfully`);
+        } catch (verifyError) {
+          console.error(`[WORKER:${jobId}] Failed to verify message:`, verifyError);
+        }
+      } else {
+        console.log(`[WORKER:${jobId}] Job processing failed, not verifying message`);
+      }
+      
+      // Check if there are more jobs in the queue
+      const remainingJobs = await hasMoreJobs();
+      console.log(`[WORKER] Remaining jobs in queue: ${remainingJobs}`);
+      
+      // If there are more jobs, trigger another worker
+      if (remainingJobs > 0) {
+        console.log('[WORKER] There are more jobs, triggering next worker');
+        triggerNextWorker(request);
+      } else {
+        console.log('[WORKER] No more jobs in queue, worker chain complete');
+      }
+      
+      console.log(`[WORKER] Worker execution completed in ${Date.now() - startTime}ms`);
+      
+      return NextResponse.json({ 
+        status: success ? 'success' : 'error',
+        jobId: message.streamId,
+        remainingJobs,
+        executionTime: Date.now() - startTime
+      });
+      
     } catch (queueError) {
       console.error('[WORKER] Failed to retrieve message from queue:', queueError);
       return NextResponse.json({ 
@@ -300,44 +339,6 @@ async function handleWorkerRequest(request: Request) {
         error: queueError instanceof Error ? queueError.message : String(queueError)
       }, { status: 500 });
     }
-    
-    // Process the job
-    console.log(`[WORKER:${jobId}] Starting job processing`);
-    const success = await processJob(message.body);
-    
-    // Verify the message if processing was successful
-    if (success) {
-      console.log(`[WORKER:${jobId}] Job processed successfully, verifying message`);
-      try {
-        await slackMessageQueue.verifyMessage(message.streamId);
-        console.log(`[WORKER:${jobId}] Message verified successfully`);
-      } catch (verifyError) {
-        console.error(`[WORKER:${jobId}] Failed to verify message:`, verifyError);
-      }
-    } else {
-      console.log(`[WORKER:${jobId}] Job processing failed, not verifying message`);
-    }
-    
-    // Check if there are more jobs in the queue
-    const remainingJobs = await hasMoreJobs();
-    console.log(`[WORKER] Remaining jobs in queue: ${remainingJobs}`);
-    
-    // If there are more jobs, trigger another worker
-    if (remainingJobs > 0) {
-      console.log('[WORKER] There are more jobs, triggering next worker');
-      triggerNextWorker(request);
-    } else {
-      console.log('[WORKER] No more jobs in queue, worker chain complete');
-    }
-    
-    console.log(`[WORKER] Worker execution completed in ${Date.now() - startTime}ms`);
-    
-    return NextResponse.json({ 
-      status: success ? 'success' : 'error',
-      jobId: message.streamId,
-      remainingJobs,
-      executionTime: Date.now() - startTime
-    });
   } catch (error) {
     console.error('[WORKER] Unhandled error in worker:', error);
     return NextResponse.json({ 
