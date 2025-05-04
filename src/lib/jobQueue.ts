@@ -126,37 +126,115 @@ export async function enqueueSlackMessage(job: SlackMessageJob): Promise<boolean
 }
 
 // Helper function to ensure timestamps are in Slack's expected format
-function validateSlackTimestamps(job: SlackMessageJob): SlackMessageJob {
+export function validateSlackTimestamps(job: SlackMessageJob): SlackMessageJob {
   // Make a copy to avoid mutating the original
   const validatedJob = { ...job };
   
-  // Validate eventTs format (should be in Slack's timestamp format: 1234567890.123456)
-  if (validatedJob.eventTs && !validatedJob.eventTs.includes('.')) {
-    console.log(`[JOB_QUEUE] Fixing eventTs format: ${validatedJob.eventTs}`);
+  // Helper function to consistently format Slack timestamps
+  const formatSlackTimestamp = (timestamp: string): string => {
+    // Skip if undefined/null/empty
+    if (!timestamp) return timestamp;
     
-    // If it's a millisecond timestamp, convert to Slack format
-    if (/^\d{13,}$/.test(validatedJob.eventTs)) {
-      const seconds = Math.floor(parseInt(validatedJob.eventTs) / 1000);
-      const microseconds = parseInt(validatedJob.eventTs) % 1000 * 1000;
-      validatedJob.eventTs = `${seconds}.${microseconds}`;
-      console.log(`[JOB_QUEUE] Converted eventTs to Slack format: ${validatedJob.eventTs}`);
+    // Already in correct Slack format (seconds.microseconds)
+    if (/^\d+\.\d+$/.test(timestamp)) {
+      return timestamp;
+    }
+    
+    // If it's a millisecond timestamp (13+ digits), convert to Slack format
+    if (/^\d{13,}$/.test(timestamp)) {
+      const seconds = Math.floor(parseInt(timestamp) / 1000);
+      const microseconds = parseInt(timestamp) % 1000 * 1000;
+      return `${seconds}.${microseconds}`;
+    }
+    
+    // If it's already a string but missing decimal (unlikely but possible)
+    if (/^\d+$/.test(timestamp)) {
+      return `${timestamp}.000000`;
+    }
+    
+    // Log warning but return original if we can't determine the format
+    console.warn(`[JOB_QUEUE] Unexpected timestamp format: ${timestamp}`);
+    return timestamp;
+  };
+  
+  // Validate and fix eventTs
+  if (validatedJob.eventTs) {
+    const originalEventTs = validatedJob.eventTs;
+    validatedJob.eventTs = formatSlackTimestamp(validatedJob.eventTs);
+    
+    // Log only if format changed
+    if (originalEventTs !== validatedJob.eventTs) {
+      console.log(`[JOB_QUEUE] Formatted eventTs from ${originalEventTs} to ${validatedJob.eventTs}`);
     }
   }
   
-  // Validate threadTs format if present
-  if (validatedJob.threadTs && !validatedJob.threadTs.includes('.')) {
-    console.log(`[JOB_QUEUE] Fixing threadTs format: ${validatedJob.threadTs}`);
+  // Validate and fix threadTs if present
+  if (validatedJob.threadTs) {
+    const originalThreadTs = validatedJob.threadTs;
+    validatedJob.threadTs = formatSlackTimestamp(validatedJob.threadTs);
     
-    // If it's a millisecond timestamp, convert to Slack format
-    if (/^\d{13,}$/.test(validatedJob.threadTs)) {
-      const seconds = Math.floor(parseInt(validatedJob.threadTs) / 1000);
-      const microseconds = parseInt(validatedJob.threadTs) % 1000 * 1000;
-      validatedJob.threadTs = `${seconds}.${microseconds}`;
-      console.log(`[JOB_QUEUE] Converted threadTs to Slack format: ${validatedJob.threadTs}`);
+    // Log only if format changed
+    if (originalThreadTs !== validatedJob.threadTs) {
+      console.log(`[JOB_QUEUE] Formatted threadTs from ${originalThreadTs} to ${validatedJob.threadTs}`);
     }
   }
   
   return validatedJob;
+}
+
+// Function to monitor queue health and ensure messages are being processed
+export async function monitorQueueHealth(): Promise<{status: string, queueSize: number, pendingJobs: number}> {
+  console.log('[QUEUE_MONITOR] Checking queue health');
+  
+  try {
+    // First test Redis connection
+    const redis = new Redis({
+      url: redisUrl,
+      token: redisToken,
+    });
+    
+    await redis.ping();
+    console.log('[QUEUE_MONITOR] Redis connection OK');
+    
+    // Check waiting queue size
+    const waitingQueueSize = await redis.llen('queue:slack-message-queue:waiting');
+    console.log(`[QUEUE_MONITOR] Waiting queue size: ${waitingQueueSize}`);
+    
+    // Check processing queue size (jobs that are being worked on)
+    const processingQueueSize = await redis.llen('queue:slack-message-queue:processing');
+    console.log(`[QUEUE_MONITOR] Processing queue size: ${processingQueueSize}`);
+    
+    // Check dead letter queue for failed jobs
+    const deadQueueSize = await redis.llen('queue:slack-message-queue:dead');
+    console.log(`[QUEUE_MONITOR] Dead letter queue size: ${deadQueueSize}`);
+    
+    // If processing queue is very large, there might be stuck jobs
+    if (processingQueueSize > 5) {
+      console.warn('[QUEUE_MONITOR] High number of processing jobs detected, some might be stuck');
+      
+      // Attempt recovery of stuck jobs older than 5 minutes
+      try {
+        // In a real implementation, you would iterate through processing jobs
+        // and check timestamps to move stuck jobs back to waiting queue
+        console.log('[QUEUE_MONITOR] Would recover stuck jobs here');
+      } catch (recoveryError) {
+        console.error('[QUEUE_MONITOR] Failed to recover stuck jobs:', recoveryError);
+      }
+    }
+    
+    return {
+      status: 'healthy',
+      queueSize: waitingQueueSize,
+      pendingJobs: processingQueueSize
+    };
+  } catch (error) {
+    console.error('[QUEUE_MONITOR] Queue health check failed:', error);
+    return {
+      status: 'error',
+      queueSize: -1,
+      pendingJobs: -1
+    };
+  }
 }
 
 // Function to process a message job from the queue

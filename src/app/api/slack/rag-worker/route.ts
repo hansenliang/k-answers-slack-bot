@@ -96,30 +96,51 @@ async function sendSlackMessage({ channel, text, thread_ts }: { channel: string,
       throw new Error('Slack web client is not initialized');
     }
     
-    // Validate thread_ts format if provided
-    if (thread_ts) {
-      // Slack timestamps should be in the format "1234567890.123456" (seconds.microseconds)
-      if (!thread_ts.includes('.') || !/^\d+\.\d+$/.test(thread_ts)) {
-        console.warn('[SLACK] Invalid thread_ts format detected: ' + thread_ts);
-        
-        // If it looks like milliseconds, convert it to Slack format
-        if (/^\d{13,}$/.test(thread_ts)) {
-          const seconds = Math.floor(parseInt(thread_ts) / 1000);
-          const microseconds = parseInt(thread_ts) % 1000 * 1000;
-          thread_ts = `${seconds}.${microseconds}`;
-          console.log('[SLACK] Converted timestamp to Slack format: ' + thread_ts);
-        } else {
-          // Log warning but continue with the value
-          console.warn('[SLACK] Proceeding with potentially invalid thread_ts');
-        }
+    // Helper function to format timestamp consistently
+    const formatSlackTimestamp = (timestamp: string): string => {
+      // Skip if undefined/null
+      if (!timestamp) return timestamp;
+      
+      // Already in correct Slack format (seconds.microseconds)
+      if (/^\d+\.\d+$/.test(timestamp)) {
+        return timestamp;
       }
+      
+      // If it's a millisecond timestamp, convert to Slack format
+      if (/^\d{13,}$/.test(timestamp)) {
+        const seconds = Math.floor(parseInt(timestamp) / 1000);
+        const microseconds = parseInt(timestamp) % 1000 * 1000;
+        return `${seconds}.${microseconds}`;
+      }
+      
+      // If it's already a string but missing decimal (unlikely)
+      if (/^\d+$/.test(timestamp)) {
+        return `${timestamp}.000000`;
+      }
+      
+      console.warn(`[SLACK] Unexpected timestamp format: ${timestamp}`);
+      return timestamp;
+    };
+    
+    // Format thread_ts if provided
+    const formattedThreadTs = thread_ts ? formatSlackTimestamp(thread_ts) : undefined;
+    
+    if (formattedThreadTs !== thread_ts && thread_ts) {
+      console.log(`[SLACK] Reformatted thread_ts from ${thread_ts} to ${formattedThreadTs}`);
     }
+    
+    // Log entire message before sending
+    console.log(`[SLACK] About to send message: ${JSON.stringify({
+      channel,
+      text: text.substring(0, 50) + (text.length > 50 ? '...' : ''),
+      thread_ts: formattedThreadTs
+    })}`);
     
     // Post message to Slack
     const result = await webClient.chat.postMessage({
       channel,
       text,
-      thread_ts,
+      thread_ts: formattedThreadTs,
       unfurl_links: false,
       unfurl_media: false,
     });
@@ -129,11 +150,37 @@ async function sendSlackMessage({ channel, text, thread_ts }: { channel: string,
   } catch (error) {
     console.error('[SLACK] Error sending message to Slack:', error);
     
-    // Log more details about the error
+    // Enhanced error logging
     if (error instanceof Error) {
       console.error(`[SLACK] Error type: ${error.name}`);
       console.error(`[SLACK] Error message: ${error.message}`);
       console.error(`[SLACK] Error stack: ${error.stack}`);
+      
+      // Special handling for invalid_thread_ts errors
+      if (error.message && error.message.includes('invalid_thread_ts')) {
+        console.error(`[SLACK] This is a thread_ts format error. Used thread_ts: ${thread_ts}`);
+        
+        // Try to send a backup message without thread_ts
+        try {
+          // Check again if webClient is available
+          if (!webClient) {
+            console.error('[SLACK] Cannot send fallback message - Slack web client is not initialized');
+            throw new Error('Slack web client is not initialized');
+          }
+          
+          console.log('[SLACK] Attempting fallback message without thread_ts');
+          const result = await webClient.chat.postMessage({
+            channel,
+            text: "I encountered an error with the message threading. Here's your response as a new message:\n\n" + text,
+            unfurl_links: false,
+            unfurl_media: false,
+          });
+          console.log(`[SLACK] Fallback message sent successfully: ${result.ts}`);
+          return result;
+        } catch (fallbackError) {
+          console.error('[SLACK] Fallback message also failed:', fallbackError);
+        }
+      }
     }
     
     throw error;
