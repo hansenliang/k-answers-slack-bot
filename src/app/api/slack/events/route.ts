@@ -194,7 +194,8 @@ const handleAppMention = async (event: any) => {
       userId,
       questionText,
       threadTs,
-      eventTs: event.event_ts
+      eventTs: event.event_ts,
+      useStreaming: true // Enable streaming responses by default
     };
     
     try {
@@ -355,7 +356,8 @@ const handleDirectMessage = async (event: any) => {
       userId,
       questionText,
       threadTs,
-      eventTs: event.event_ts
+      eventTs: event.event_ts,
+      useStreaming: true // Enable streaming responses by default
     };
     
     try {

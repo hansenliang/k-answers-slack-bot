@@ -8,6 +8,7 @@ export interface SlackMessageJob {
   questionText: string;
   threadTs?: string;
   eventTs: string;
+  useStreaming?: boolean; // Flag to indicate if we should use streaming responses
 }
 
 // Validate and fix the Redis URL

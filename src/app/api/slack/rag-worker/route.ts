@@ -2,7 +2,7 @@ import { NextResponse } from 'next/server';
 import { Redis } from '@upstash/redis';
 import { SlackMessageJob, slackMessageQueue } from '@/lib/jobQueue';
 import { WebClient } from '@slack/web-api';
-import { queryRag } from '@/lib/rag';
+import { queryRag, streamRag } from '@/lib/rag';
 
 // Define the runtime as nodejs to support fs, path, and other Node.js core modules
 export const runtime = 'nodejs';
@@ -293,6 +293,152 @@ async function processJob(job: SlackMessageJob): Promise<boolean> {
   }
 }
 
+// Process a job with streaming responses
+async function processJobWithStreaming(job: SlackMessageJob): Promise<boolean> {
+  const startTime = Date.now();
+  const jobId = `${job.userId}-${job.eventTs.substring(0, 8)}`;
+  console.log(`[WORKER:${jobId}] Starting to process job with streaming for user ${job.userId}, channel ${job.channelId}, text: "${job.questionText.substring(0, 30)}..."`);
+  
+  // Create a timeout promise outside to avoid variable reference issues
+  const timeoutMs = 55000; // Set to 55 seconds to leave buffer for cleanup
+  let timeoutId: NodeJS.Timeout | undefined;
+  const timeoutPromise = new Promise<never>((_, reject) => {
+    timeoutId = setTimeout(() => {
+      reject(new Error('Processing timeout after 55 seconds'));
+    }, timeoutMs);
+  });
+
+  try {
+    // IMPORTANT: Use the correct thread_ts format directly without modifying it
+    const thread_ts = job.threadTs || job.eventTs;
+    console.log(`[WORKER:${jobId}] Using thread_ts: ${thread_ts} for streaming responses`);
+    
+    // Send the initial thinking message
+    let messageResponse;
+    try {
+      messageResponse = await sendSlackMessage({
+        channel: job.channelId,
+        text: "Thinking...",
+        thread_ts: thread_ts
+      });
+      console.log(`[WORKER:${jobId}] Sent initial thinking message with ts: ${messageResponse?.ts}`);
+    } catch (initialMsgError) {
+      console.error(`[WORKER:${jobId}] Failed to send initial thinking message:`, initialMsgError);
+      // Continue with the process even if we couldn't send the initial message
+    }
+    
+    // Get the message timestamp for updates
+    const messageTs = messageResponse?.ts;
+    if (!messageTs) {
+      console.error(`[WORKER:${jobId}] Failed to get message timestamp for updates`);
+      // Fall back to normal processing if we can't get the message timestamp
+      return await processJob(job);
+    }
+    
+    // Handle streaming content
+    let lastContent = "";
+    let aborted = false;
+    
+    // Create a function to handle message updates
+    const handleMessageUpdate = async (content: string): Promise<void> => {
+      if (aborted) return; // Don't continue if the process has been aborted
+      
+      // Only update if the content has changed
+      if (content !== lastContent) {
+        lastContent = content;
+        
+        try {
+          // Attempt to update the message with new content
+          await webClient!.chat.update({
+            channel: job.channelId,
+            ts: messageTs,
+            text: content
+          });
+          console.log(`[WORKER:${jobId}] Updated message with new content (${content.length} chars)`);
+        } catch (updateError) {
+          console.error(`[WORKER:${jobId}] Error updating message:`, updateError);
+          
+          // If we can't update (e.g., rate limited), we'll still continue collecting 
+          // the full response but may skip some updates
+        }
+      }
+    };
+    
+    // Start the streaming RAG process
+    const streamingPromise = streamRag(job.questionText, handleMessageUpdate);
+    
+    try {
+      // Race between the streaming process and the timeout
+      await Promise.race([
+        streamingPromise,
+        timeoutPromise.catch(error => {
+          // If timeout occurs, abort streaming but still send what we have
+          aborted = true;
+          throw error;
+        })
+      ]);
+      
+      // Clear the timeout since we finished before it triggered
+      if (timeoutId) clearTimeout(timeoutId);
+      
+      const processingTime = Date.now() - startTime;
+      console.log(`[WORKER:${jobId}] Successfully processed streaming job in ${processingTime}ms`);
+      
+      // Ensure that the content is delivered in its entirety
+      if (lastContent && !aborted) {
+        try {
+          console.log(`[WORKER:${jobId}] Sending final content update (${lastContent.length} chars)`);
+          await webClient!.chat.update({
+            channel: job.channelId,
+            ts: messageTs,
+            text: lastContent
+          });
+        } catch (finalUpdateError) {
+          console.error(`[WORKER:${jobId}] Error sending final update:`, finalUpdateError);
+        }
+      }
+      
+      return true;
+    } catch (error) {
+      // Clear the timeout
+      if (timeoutId) clearTimeout(timeoutId);
+      
+      console.error(`[WORKER:${jobId}] Error during streaming process:`, error);
+      
+      // If we have partial content, try to send that with an error note
+      if (lastContent) {
+        try {
+          await webClient!.chat.update({
+            channel: job.channelId,
+            ts: messageTs,
+            text: lastContent + "\n\n(Note: This response may be incomplete due to an error during processing.)"
+          });
+          console.log(`[WORKER:${jobId}] Updated message with partial content and error note`);
+        } catch (errorUpdateError) {
+          console.error(`[WORKER:${jobId}] Failed to update message with error note:`, errorUpdateError);
+        }
+      } else {
+        // If we have no content at all, send a generic error message
+        try {
+          await webClient!.chat.update({
+            channel: job.channelId,
+            ts: messageTs,
+            text: "I'm sorry, I encountered an error while processing your request. Please try again later."
+          });
+          console.log(`[WORKER:${jobId}] Updated message with error message`);
+        } catch (errorMsgError) {
+          console.error(`[WORKER:${jobId}] Failed to update message with error:`, errorMsgError);
+        }
+      }
+      
+      return false;
+    }
+  } finally {
+    // Ensure timeout is cleared
+    if (timeoutId) clearTimeout(timeoutId);
+  }
+}
+
 // Main handler for the worker route
 export async function POST(request: Request) {
   console.log('[WORKER] Worker endpoint called via POST');
@@ -470,7 +616,11 @@ async function handleWorkerRequest(request: Request) {
       
       // Process the job
       console.log(`[WORKER:${jobId}] Starting job processing`);
-      const success = await processJob(message.body);
+      const useStreaming = message.body.useStreaming !== false; // Default to streaming if not explicitly disabled
+      console.log(`[WORKER:${jobId}] Processing mode: ${useStreaming ? 'streaming' : 'standard'}`);
+      const success = useStreaming 
+        ? await processJobWithStreaming(message.body)
+        : await processJob(message.body);
       
       // Verify the message was processed successfully
       if (success) {
