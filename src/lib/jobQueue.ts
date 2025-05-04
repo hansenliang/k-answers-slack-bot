@@ -1,6 +1,9 @@
 import { Queue } from '@upstash/queue';
 import { Redis } from '@upstash/redis';
 
+// Import Redis directly to avoid type conflicts for fallback methods
+import { Redis as DirectRedis } from '@upstash/redis';
+
 // Define the job structure
 export interface SlackMessageJob {
   channelId: string;
@@ -83,7 +86,6 @@ export async function enqueueSlackMessage(job: SlackMessageJob): Promise<boolean
     }
     
     // IMPORTANT: Always use the Queue library to ensure proper message format
-    // Never use direct Redis operations (lpush, etc.) to add messages to the queue
     console.log(`[JOB_QUEUE:${jobId}] Calling slackMessageQueue.sendMessage with properly formatted job`);
     const result = await slackMessageQueue.sendMessage(job);
     console.log(`[JOB_QUEUE:${jobId}] Queue.sendMessage result: ${result}`);

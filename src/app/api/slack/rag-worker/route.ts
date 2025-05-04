@@ -31,6 +31,60 @@ async function hasMoreJobs(): Promise<number> {
   }
 }
 
+// Get direct message from Redis if queue library fails
+async function getDirectMessageFromRedis(): Promise<{streamId: string, body: SlackMessageJob} | null> {
+  try {
+    console.log('[WORKER] Attempting to directly access Redis queue');
+    
+    const redis = new Redis({
+      url: process.env.UPSTASH_REDIS_URL || '',
+      token: process.env.UPSTASH_REDIS_TOKEN || '',
+    });
+    
+    // Get queue items
+    const items = await redis.lrange('queue:slack-message-queue:waiting', 0, 0);
+    
+    if (items.length === 0) {
+      console.log('[WORKER] No items found in Redis queue');
+      return null;
+    }
+    
+    console.log('[WORKER] Found item in direct Redis queue');
+    
+    // Parse the item and create a synthetic message
+    try {
+      const parsedItem = JSON.parse(items[0]);
+      
+      // If it's already in the right format
+      if (parsedItem.streamId && parsedItem.body) {
+        // Remove the item from the queue
+        await redis.lrem('queue:slack-message-queue:waiting', 1, items[0]);
+        return parsedItem;
+      }
+      
+      // If it's a direct job (not wrapped)
+      if (parsedItem.channelId && parsedItem.userId && parsedItem.questionText) {
+        // Remove the item from the queue
+        await redis.lrem('queue:slack-message-queue:waiting', 1, items[0]);
+        
+        // Return in the correct format
+        return {
+          streamId: `manual-${Date.now()}`,
+          body: parsedItem
+        };
+      }
+    } catch (parseError) {
+      console.error('[WORKER] Error parsing queue item:', parseError);
+      return null;
+    }
+    
+    return null;
+  } catch (error) {
+    console.error('[WORKER] Error directly accessing Redis:', error);
+    return null;
+  }
+}
+
 // Send a message to Slack
 async function sendSlackMessage({ channel, text, thread_ts }: { channel: string, text: string, thread_ts?: string }) {
   console.log(`[SLACK] Sending message to channel ${channel}${thread_ts ? ' in thread ' + thread_ts : ''}`);
@@ -296,98 +350,12 @@ async function handleWorkerRequest(request: Request) {
       console.log('[WORKER] receiveMessage completed, result:', message ? 'Message received' : 'No message found');
       
       if (!message) {
-        // Try direct Redis approach as fallback
-        console.log('[WORKER] Attempting direct Redis queue access as fallback');
-        try {
-          const queueKey = 'queue:slack-message-queue:waiting';
-          // Create a new direct Redis connection
-          const directRedis = new Redis({
-            url: process.env.UPSTASH_REDIS_URL || '',
-            token: process.env.UPSTASH_REDIS_TOKEN || '',
-          });
-          
-          // Get the first item without removing it
-          const items = await directRedis.lrange(queueKey, 0, 0);
-          
-          if (items.length > 0) {
-            console.log('[WORKER] Found item in queue via direct Redis access');
-            try {
-              // Try to parse the item
-              const parsedItem = JSON.parse(items[0]);
-              console.log('[WORKER] Parsed item structure:', Object.keys(parsedItem));
-              
-              // If it has the expected format with streamId and body, process it normally
-              if (parsedItem.streamId && parsedItem.body && typeof parsedItem.body === 'object') {
-                console.log('[WORKER] Item has proper format with streamId and body, processing normally');
-                
-                // Create a synthetic message object matching what Upstash Queue expects
-                message = {
-                  streamId: parsedItem.streamId,
-                  body: parsedItem.body
-                };
-                
-                // Remove the item from the queue
-                console.log('[WORKER] Removing properly formatted item from queue');
-                await directRedis.lrem(queueKey, 1, items[0]);
-                
-                console.log('[WORKER] Successfully retrieved message via fallback method');
-              } 
-              // Handle legacy or incorrectly formatted messages 
-              else if (parsedItem.channelId && parsedItem.userId && parsedItem.questionText) {
-                console.log('[WORKER] Found legacy format message, converting to proper format');
-                
-                // It's a direct job object without the wrapper - create proper structure
-                message = {
-                  streamId: `manual-${Date.now()}`,
-                  body: parsedItem // The whole object is the body in this case
-                };
-                
-                // Remove the legacy item from the queue
-                console.log('[WORKER] Removing legacy formatted item from queue');
-                await directRedis.lrem(queueKey, 1, items[0]);
-                
-                console.log('[WORKER] Successfully converted legacy message to proper format');
-              } else {
-                console.log('[WORKER] Item has invalid format, cannot process:', parsedItem);
-                
-                // Remove the invalid item to prevent queue clogging
-                console.log('[WORKER] Removing invalid item from queue to prevent blocking');
-                await directRedis.lrem(queueKey, 1, items[0]);
-                
-                console.log('[WORKER] Invalid message removed from queue');
-              }
-            } catch (parseError) {
-              console.error('[WORKER] Error parsing queue item:', parseError);
-              
-              // Also remove unparseable items to prevent blocking the queue
-              console.log('[WORKER] Removing unparseable item from queue');
-              await directRedis.lrem(queueKey, 1, items[0]);
-              
-              console.log('[WORKER] Unparseable message removed from queue');
-            }
-          }
-        } catch (directRedisError) {
-          console.error('[WORKER] Error in direct Redis fallback:', directRedisError);
-        }
-      }
-      
-      if (!message) {
-        // If this was a direct trigger from Slack events and no message was found,
-        // there might be a race condition where the message is still being enqueued
-        if ((isDirectTrigger || isSlackEvent) && requestBody) {
-          console.log('[WORKER] Direct trigger with no message - waiting to check for delayed enqueue');
-          // Wait a bit longer (2 seconds) as message enqueuing might be delayed
-          await new Promise(resolve => setTimeout(resolve, 2000));
-          
-          // Try again after waiting
-          message = await slackMessageQueue.receiveMessage<SlackMessageJob>();
-          console.log('[WORKER] After waiting, receiveMessage completed, result:', message ? 'Message received' : 'No message found');
-        }
+        console.log('[WORKER] No messages in queue to process');
         
-        // Still no message found
+        // Try direct Redis access as a final attempt
+        message = await getDirectMessageFromRedis();
+        
         if (!message) {
-          console.log('[WORKER] No messages in queue to process');
-          
           // Check queue directly as a last resort
           try {
             const redis = new Redis({

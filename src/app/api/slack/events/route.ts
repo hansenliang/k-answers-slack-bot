@@ -307,9 +307,17 @@ const handleDirectMessage = async (event: any) => {
       return;
     }
     
+    // Check if this is our own bot's acknowledgment message
+    const ourBotId = process.env.SLACK_BOT_USER_ID;
+    console.log(`[DIRECT_MSG] Message from user id: ${event.user}, our bot id: ${ourBotId}`);
+    
     // Skip if the message is from a bot (loop prevention)
     if (event.bot_id || event.subtype === 'bot_message') {
-      console.log('[DIRECT_MSG] Ignoring DM from a bot', { bot_id: event.bot_id, subtype: event.subtype });
+      console.log('[DIRECT_MSG] Ignoring DM from a bot', { 
+        bot_id: event.bot_id, 
+        subtype: event.subtype,
+        is_our_bot: event.bot_id === ourBotId || event.user === ourBotId
+      });
       return;
     }
 
