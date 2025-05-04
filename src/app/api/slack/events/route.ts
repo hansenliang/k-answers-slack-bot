@@ -130,6 +130,90 @@ const verifySlackRequest = (
   }
 };
 
+// Helper function to handle Slack message directly, bypassing the queue
+async function handleDirectProcessing(event: any, isAppMention = false) {
+  let userId, questionText = '';
+  const eventId = event.event_ts;
+  const processingId = `direct-${eventId.substring(0, 8)}`;
+
+  try {
+    userId = event.user;
+    const channelId = event.channel || '';  // Ensure channelId is a string
+    const threadTs = event.thread_ts || event.ts;
+
+    // Check if text property exists before using it
+    if (!event.text) {
+      console.log(`[DIRECT_PROCESS:${processingId}] Warning: event.text is undefined or null`);
+      // Set a default questionText for logging/debugging
+      questionText = "[No text provided]";
+    } else {
+      // For app_mention, extract text by removing the bot mention
+      if (isAppMention) {
+        const botUserId = await getBotUserId();
+        const mentionTag = `<@${botUserId}>`;
+        questionText = event.text.replace(mentionTag, '').trim();
+      } else {
+        questionText = event.text.trim();
+      }
+    }
+
+    console.log(`[DIRECT_PROCESS:${processingId}] Processing message for user ${userId} with text: "${questionText.substring(0, 30)}..."`);
+
+    // If we don't have valid text or channel, we can't proceed
+    if (questionText === "[No text provided]" || !channelId) {
+      console.error(`[DIRECT_PROCESS:${processingId}] Cannot process message: ${!channelId ? 'Missing channelId' : 'No text provided'}`);
+      return false;
+    }
+
+    // Send "Thinking..." message and capture its timestamp for updating later
+    console.log(`[DIRECT_PROCESS:${processingId}] Sending initial thinking message`);
+    
+    // Create message options with conditional thread_ts inclusion
+    const messageOptions: any = {
+      channel: channelId,
+      text: "Thinking..."
+    };
+    
+    // Only add thread_ts if it exists
+    if (threadTs) {
+      messageOptions.thread_ts = threadTs;
+    }
+    
+    const initialResponse = await webClient.chat.postMessage(messageOptions);
+
+    const messageTs = initialResponse.ts;
+    console.log(`[DIRECT_PROCESS:${processingId}] Initial message sent with ts: ${messageTs}`);
+
+    // Process the response with RAG in the background
+    // We're not awaiting this to keep the request time short for Slack
+    // Fix linter error by ensuring all parameters are strings
+    const messageTimeStamp = messageTs || '';
+    handleRagProcessing(questionText, channelId, messageTimeStamp)
+      .catch(error => console.error(`[DIRECT_PROCESS:${processingId}] Error in background processing:`, error));
+
+    return true;
+  } catch (error) {
+    console.error(`[DIRECT_PROCESS:${processingId}] Error in direct processing:`, error);
+    
+    // Try to send an error message if we have channelId
+    try {
+      if (event.channel) {
+        await webClient.chat.postMessage({
+          channel: event.channel,
+          text: "I encountered an error while processing your message. Please try again later."
+          // No thread_ts here - if we failed earlier, we may not have a valid threadTs
+        });
+      } else {
+        console.error(`[DIRECT_PROCESS:${processingId}] Cannot send error message: Missing channelId`);
+      }
+    } catch (msgError) {
+      console.error(`[DIRECT_PROCESS:${processingId}] Error sending error message:`, msgError);
+    }
+    
+    return false;
+  }
+}
+
 // Handle a mention in a public channel
 const handleAppMention = async (event: any) => {
   console.log('[APP_MENTION] Starting to process app_mention event', { event_id: event.event_ts });
@@ -142,155 +226,70 @@ const handleAppMention = async (event: any) => {
 
     const userId = event.user;
     const channelId = event.channel;
-    const threadTs = event.thread_ts || event.ts;
     
-    console.log(`[APP_MENTION] Received app_mention from user ${userId} in channel ${channelId}, thread_ts: ${threadTs}`);
+    console.log(`[APP_MENTION] Received app_mention from user ${userId} in channel ${channelId}`);
 
     // Check rate limit
     if (!checkRateLimit(userId)) {
       console.log(`[APP_MENTION] User ${userId} hit rate limit, sending notification`);
-      await webClient.chat.postMessage({
+      
+      const threadTs = event.thread_ts || event.ts;
+      const messageOptions: any = {
         channel: channelId,
-        text: "You've hit your rate limit (5 questions/min). Please wait a moment and try again.",
-        thread_ts: threadTs,
-      });
+        text: "You've hit your rate limit (5 questions/min). Please wait a moment and try again."
+      };
+      
+      if (threadTs) {
+        messageOptions.thread_ts = threadTs;
+      }
+      
+      await webClient.chat.postMessage(messageOptions);
       console.log(`[APP_MENTION] Rate limit notification sent to user ${userId}`);
       return;
     }
 
-    // Extract message text (remove the @mention part)
-    console.log(`[APP_MENTION] Getting bot info to extract mention`);
+    // Extract message text (remove the @mention part) 
     const botUserId = await getBotUserId();
-    console.log(`[APP_MENTION] Bot user ID: ${botUserId}`);
-    
     const mentionTag = `<@${botUserId}>`;
     const questionText = event.text.replace(mentionTag, '').trim();
-    console.log(`[APP_MENTION] Extracted question text: "${questionText}"`);
     
     if (!questionText) {
       console.log(`[APP_MENTION] Empty question from user ${userId}, sending prompt`);
-      await webClient.chat.postMessage({
+      
+      const threadTs = event.thread_ts || event.ts;
+      const messageOptions: any = {
         channel: channelId,
-        text: "I didn't receive a question. Please try again with a question after the mention.",
-        thread_ts: threadTs,
-      });
+        text: "I didn't receive a question. Please try again with a question after the mention."
+      };
+      
+      if (threadTs) {
+        messageOptions.thread_ts = threadTs;
+      }
+      
+      await webClient.chat.postMessage(messageOptions);
       console.log(`[APP_MENTION] Empty question notification sent to user ${userId}`);
       return;
     }
 
-    // Send acknowledgment to user immediately
-    console.log(`[APP_MENTION] Sending acknowledgment to user ${userId}`);
-    await webClient.chat.postMessage({
-      channel: channelId,
-      text: "I'm processing your question. I'll be back shortly with an answer.",
-      thread_ts: threadTs,
-    });
-
-    // Enqueue the job for background processing instead of processing inline
-    const jobId = `${event.user}-${event.event_ts.substring(0, 8)}`;
-    console.log(`[APP_MENTION:${jobId}] Enqueueing job for user ${event.user}`);
-    const job = {
-      channelId,
-      userId,
-      questionText,
-      threadTs,
-      eventTs: event.event_ts,
-      useStreaming: true // Enable streaming responses by default
-    };
-    
-    try {
-      console.log(`[APP_MENTION:${jobId}] Calling enqueueSlackMessage`);
-      const enqueued = await enqueueSlackMessage(job);
-      
-      if (enqueued) {
-        console.log(`[APP_MENTION:${jobId}] Successfully enqueued job for ${userId}`);
-        
-        // Verify queue status
-        try {
-          const { Redis } = await import('@upstash/redis');
-          const redis = new Redis({
-            url: process.env.UPSTASH_REDIS_URL || '',
-            token: process.env.UPSTASH_REDIS_TOKEN || '',
-          });
-          
-          // Check queue length
-          const queueLength = await redis.llen('queue:slack-message-queue:waiting');
-          console.log(`[APP_MENTION:${jobId}] Queue length after enqueue: ${queueLength}`);
-          
-          // If the queue is empty despite successful enqueue, something is wrong
-          if (queueLength === 0) {
-            console.error(`[APP_MENTION:${jobId}] Queue is empty after successful enqueue. This indicates a potential issue with the queue.`);
-          }
-        } catch (redisError) {
-          console.error(`[APP_MENTION:${jobId}] Failed to verify queue status:`, redisError);
-        }
-        
-        // Now immediately trigger the worker to process this job
-        console.log(`[APP_MENTION:${jobId}] Triggering worker endpoint`);
-        try {
-          const workerUrl = new URL(process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : 'http://localhost:3000');
-          workerUrl.pathname = '/api/slack/rag-worker';
-          
-          const workerSecretKey = process.env.WORKER_SECRET_KEY || '';
-          
-          // Fire and forget - don't await the result
-          fetch(`${workerUrl.origin}/api/slack/rag-worker?key=${workerSecretKey}`, {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              'Authorization': `Bearer ${workerSecretKey}`
-            },
-            body: JSON.stringify({ type: 'direct_trigger', jobId })
-          }).catch(error => {
-            console.error(`[APP_MENTION:${jobId}] Failed to trigger worker:`, error);
-          });
-          
-          console.log(`[APP_MENTION:${jobId}] Worker trigger request sent`);
-        } catch (workerError) {
-          console.error(`[APP_MENTION:${jobId}] Error triggering worker:`, workerError);
-        }
-      } else {
-        console.error(`[APP_MENTION:${jobId}] Failed to enqueue job for ${userId}`);
-        
-        // Log environment variables status (safely)
-        console.error(`[APP_MENTION:${jobId}] Environment check - UPSTASH_REDIS_URL: ${!!process.env.UPSTASH_REDIS_URL}, UPSTASH_REDIS_TOKEN: ${!!process.env.UPSTASH_REDIS_TOKEN}`);
-        
-        // Send failure notification to user
-        await webClient.chat.postMessage({
-          channel: channelId,
-          text: "I encountered an error while processing your request. Please try again later.",
-          thread_ts: threadTs,
-        });
-      }
-    } catch (enqueueError) {
-      console.error(`[APP_MENTION:${jobId}] Exception during enqueue:`, enqueueError);
-      if (enqueueError instanceof Error) {
-        console.error(`[APP_MENTION:${jobId}] Error message: ${enqueueError.message}`);
-        if (enqueueError.stack) {
-          console.error(`[APP_MENTION:${jobId}] Stack trace: ${enqueueError.stack}`);
-        }
-      }
-      
-      // Send error notification
-      try {
-        await webClient.chat.postMessage({
-          channel: channelId,
-          text: "I encountered an error while processing your request. Please try again later.",
-          thread_ts: threadTs,
-        });
-      } catch (postError) {
-        console.error(`[APP_MENTION:${jobId}] Failed to send error message:`, postError);
-      }
-    }
+    // Process the message directly instead of using the queue
+    console.log(`[APP_MENTION] Processing message directly for user ${userId}`);
+    await handleDirectProcessing(event, true);
   } catch (error) {
     console.error('[APP_MENTION] Error handling app_mention event:', error);
     try {
       console.log(`[APP_MENTION] Attempting to send error message for event ${event.event_ts}`);
-      await webClient.chat.postMessage({
+      
+      const threadTs = event.thread_ts || event.ts;
+      const messageOptions: any = {
         channel: event.channel,
-        text: "I encountered an error while processing your question. Please try again later.",
-        thread_ts: event.thread_ts || event.ts,
-      });
+        text: "I encountered an error while processing your question. Please try again later."
+      };
+      
+      if (threadTs) {
+        messageOptions.thread_ts = threadTs;
+      }
+      
+      await webClient.chat.postMessage(messageOptions);
       console.log(`[APP_MENTION] Error message sent for event ${event.event_ts}`);
     } catch (postError) {
       console.error('[APP_MENTION] Failed to send error message:', postError);
@@ -308,182 +307,47 @@ const handleDirectMessage = async (event: any) => {
       return;
     }
     
-    // Check if this is our own bot's acknowledgment message
-    const ourBotId = process.env.SLACK_BOT_USER_ID;
-    console.log(`[DIRECT_MSG] Message from user id: ${event.user}, our bot id: ${ourBotId}`);
-    
     // Skip if the message is from a bot (loop prevention)
     if (event.bot_id || event.subtype === 'bot_message') {
       console.log('[DIRECT_MSG] Ignoring DM from a bot', { 
         bot_id: event.bot_id, 
-        subtype: event.subtype,
-        is_our_bot: event.bot_id === ourBotId || event.user === ourBotId
+        subtype: event.subtype
       });
       return;
     }
 
     const userId = event.user;
-    const channelId = event.channel;
-    const threadTs = event.thread_ts;
-    const questionText = event.text.trim();
-    console.log(`[DIRECT_MSG] Received DM from user ${userId} in channel ${channelId}, thread_ts: ${threadTs}`);
+    console.log(`[DIRECT_MSG] Received DM from user ${userId} in channel ${event.channel}`);
 
     // Check rate limit
     if (!checkRateLimit(userId)) {
       console.log(`[DIRECT_MSG] User ${userId} hit rate limit, sending notification`);
-      await webClient.chat.postMessage({
-        channel: channelId,
-        text: "You've hit your rate limit (5 questions/min). Please wait a moment and try again.",
-        thread_ts: threadTs,
-      });
+      
+      const threadTs = event.thread_ts;
+      const messageOptions: any = {
+        channel: event.channel,
+        text: "You've hit your rate limit (5 questions/min). Please wait a moment and try again."
+      };
+      
+      if (threadTs) {
+        messageOptions.thread_ts = threadTs;
+      }
+      
+      await webClient.chat.postMessage(messageOptions);
       console.log(`[DIRECT_MSG] Rate limit notification sent to user ${userId}`);
       return;
     }
 
-    // Send acknowledgment to user immediately
-    console.log(`[DIRECT_MSG] Sending acknowledgment to user ${userId}`);
-    await webClient.chat.postMessage({
-      channel: channelId,
-      text: "I'm processing your question. I'll be back shortly with an answer.",
-      thread_ts: threadTs,
-    });
-
-    // Enqueue the job for background processing instead of processing inline
-    const jobId = `${event.user}-${event.event_ts.substring(0, 8)}`;
-    console.log(`[DIRECT_MSG:${jobId}] Enqueueing job for user ${event.user}`);
-    const job = {
-      channelId,
-      userId,
-      questionText,
-      threadTs,
-      eventTs: event.event_ts,
-      useStreaming: true // Enable streaming responses by default
-    };
-    
-    try {
-      console.log(`[DIRECT_MSG:${jobId}] Calling enqueueSlackMessage`);
-      const enqueued = await enqueueSlackMessage(job);
-      
-      if (enqueued) {
-        console.log(`[DIRECT_MSG:${jobId}] Successfully enqueued job for ${userId}`);
-        
-        // Verify queue status
-        try {
-          const { Redis } = await import('@upstash/redis');
-          const redis = new Redis({
-            url: process.env.UPSTASH_REDIS_URL || '',
-            token: process.env.UPSTASH_REDIS_TOKEN || '',
-          });
-          
-          // Check queue length
-          const queueLength = await redis.llen('queue:slack-message-queue:waiting');
-          console.log(`[DIRECT_MSG:${jobId}] Queue length after enqueue: ${queueLength}`);
-          
-          // If the queue is empty despite successful enqueue, something is wrong
-          if (queueLength === 0) {
-            console.error(`[DIRECT_MSG:${jobId}] Queue is empty after successful enqueue. This indicates a potential issue with the queue.`);
-          }
-        } catch (redisError) {
-          console.error(`[DIRECT_MSG:${jobId}] Failed to verify queue status:`, redisError);
-        }
-        
-        // Now immediately trigger the worker to process this job
-        console.log(`[DIRECT_MSG:${jobId}] Triggering worker endpoint`);
-        try {
-          // Get the deployment URL more reliably
-          const baseUrl = process.env.VERCEL_URL ? 
-            `https://${process.env.VERCEL_URL}` : 
-            (process.env.DEPLOYMENT_URL || 'https://k-answers-bot.vercel.app');
-          
-          const workerUrl = `${baseUrl}/api/slack/rag-worker`;
-          const workerSecretKey = process.env.WORKER_SECRET_KEY || '';
-          
-          console.log(`[DIRECT_MSG:${jobId}] Worker URL: ${workerUrl}`);
-          
-          // Create a more detailed payload with job information
-          const workerPayload = {
-            type: 'direct_trigger',
-            jobId,
-            source: 'slack_events',
-            timestamp: Date.now(),
-            messageInfo: {
-              channelId, 
-              userId,
-              questionText,
-              threadTs: event.thread_ts,
-              eventTs: event.event_ts
-            }
-          };
-          
-          // Send a POST request to trigger the worker
-          // Don't await this to avoid blocking the response to Slack
-          fetch(workerUrl + `?key=${workerSecretKey}`, {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              'X-Trigger-Source': 'slack_events',
-              'X-Job-ID': jobId
-            },
-            body: JSON.stringify(workerPayload)
-          }).then(response => {
-            if (!response.ok) {
-              console.error(`[DIRECT_MSG:${jobId}] Worker trigger response not OK: ${response.status}`);
-              return response.text().then(text => {
-                console.error(`[DIRECT_MSG:${jobId}] Worker error response: ${text}`);
-              });
-            } else {
-              return response.json().then(data => {
-                console.log(`[DIRECT_MSG:${jobId}] Worker trigger successful:`, data);
-              });
-            }
-          }).catch(error => {
-            console.error(`[DIRECT_MSG:${jobId}] Error triggering worker:`, error);
-          });
-          
-          console.log(`[DIRECT_MSG:${jobId}] Worker trigger request sent`);
-        } catch (error) {
-          console.error(`[DIRECT_MSG:${jobId}] Failed to trigger worker:`, error);
-        }
-      } else {
-        console.error(`[DIRECT_MSG:${jobId}] Failed to enqueue job for ${userId}`);
-        
-        // Log environment variables status (safely)
-        console.error(`[DIRECT_MSG:${jobId}] Environment check - UPSTASH_REDIS_URL: ${!!process.env.UPSTASH_REDIS_URL}, UPSTASH_REDIS_TOKEN: ${!!process.env.UPSTASH_REDIS_TOKEN}`);
-        
-        // Send failure notification to user
-        await webClient.chat.postMessage({
-          channel: channelId,
-          text: "I encountered an error while processing your request. Please try again later.",
-          thread_ts: threadTs,
-        });
-      }
-    } catch (enqueueError) {
-      console.error(`[DIRECT_MSG:${jobId}] Exception during enqueue:`, enqueueError);
-      if (enqueueError instanceof Error) {
-        console.error(`[DIRECT_MSG:${jobId}] Error message: ${enqueueError.message}`);
-        if (enqueueError.stack) {
-          console.error(`[DIRECT_MSG:${jobId}] Stack trace: ${enqueueError.stack}`);
-        }
-      }
-      
-      // Send error notification
-      try {
-        await webClient.chat.postMessage({
-          channel: channelId,
-          text: "I encountered an error while processing your request. Please try again later.",
-          thread_ts: threadTs,
-        });
-      } catch (postError) {
-        console.error(`[DIRECT_MSG:${jobId}] Failed to send error message:`, postError);
-      }
-    }
+    // Process the message directly instead of using the queue
+    console.log(`[DIRECT_MSG] Processing message directly for user ${userId}`);
+    await handleDirectProcessing(event, false);
   } catch (error) {
     console.error('[DIRECT_MSG] Error handling direct message event:', error);
     try {
       console.log(`[DIRECT_MSG] Attempting to send error message for event ${event.event_ts}`);
       await webClient.chat.postMessage({
         channel: event.channel,
-        text: "I encountered an error while processing your question. Please try again later.",
+        text: "I encountered an error while processing your question. Please try again later."
       });
       console.log(`[DIRECT_MSG] Error message sent for event ${event.event_ts}`);
     } catch (postError) {
@@ -491,6 +355,48 @@ const handleDirectMessage = async (event: any) => {
     }
   }
 };
+
+// Function to handle the RAG processing and update the message when done
+async function handleRagProcessing(questionText: string, channelId: string, messageTs: string) {
+  const processingId = `rag-${Date.now().toString().substring(0, 8)}`;
+  
+  try {
+    console.log(`[RAG_PROCESS:${processingId}] Starting RAG processing for question: "${questionText.substring(0, 30)}..."`);
+    
+    // Get the answer from RAG
+    const startTime = Date.now();
+    const answer = await queryRag(questionText);
+    const processingTime = Date.now() - startTime;
+    
+    console.log(`[RAG_PROCESS:${processingId}] RAG processing completed in ${processingTime}ms`);
+    
+    // Update the original "Thinking..." message with the answer
+    console.log(`[RAG_PROCESS:${processingId}] Updating message with answer`);
+    await webClient.chat.update({
+      channel: channelId,
+      ts: messageTs,
+      text: answer
+    });
+    
+    console.log(`[RAG_PROCESS:${processingId}] Message successfully updated with answer`);
+    return true;
+  } catch (error) {
+    console.error(`[RAG_PROCESS:${processingId}] Error during RAG processing:`, error);
+    
+    // Try to update the message with an error
+    try {
+      await webClient.chat.update({
+        channel: channelId,
+        ts: messageTs,
+        text: "I'm sorry, I encountered an error while processing your question. Please try again later."
+      });
+    } catch (updateError) {
+      console.error(`[RAG_PROCESS:${processingId}] Error updating message with error:`, updateError);
+    }
+    
+    return false;
+  }
+}
 
 // Main request handler
 export async function POST(request: Request) {
@@ -533,57 +439,35 @@ export async function POST(request: Request) {
       // Handle events according to their type
       const event = body.event;
       
-      // Trigger handlers in the background without blocking the response
-      if (event.type === 'app_mention' || event.type === 'message') {
-        // Prepare the response first
-        const response = NextResponse.json({ ok: true });
+      // CRITICAL: Prepare the response first to send it back to Slack quickly
+      const response = NextResponse.json({ ok: true });
+      
+      // Process the event asynchronously after sending the response
+      if (event.type === 'app_mention') {
+        // Fire and forget - don't block the response to Slack
+        console.log('[SLACK_POST] Starting background processing for app_mention');
         
-        // After preparing the response, start a background process to handle the event
-        console.log('[SLACK_POST] Starting background processing after response');
+        // Use setTimeout with 0 delay to ensure this runs after the response is sent
+        setTimeout(() => {
+          handleAppMention(event)
+            .catch(error => console.error('[SLACK_POST] Async error in app_mention handler:', error));
+        }, 0);
+      } else if (event.type === 'message') {
+        // Fire and forget - don't block the response to Slack
+        console.log('[SLACK_POST] Starting background processing for message');
         
-        // Process the event synchronously to enqueue it
-        if (event.type === 'app_mention') {
-          handleAppMention(event).catch(error => 
-            console.error('[SLACK_POST] Async error in app_mention handler:', error)
-          );
-        } else if (event.type === 'message') {
-          handleDirectMessage(event).catch(error => 
-            console.error('[SLACK_POST] Async error in direct message handler:', error)
-          );
-        }
-        
-        // IMPORTANT: We still need to trigger the worker to process the message immediately
-        // The message format is correct now, but we need to ensure the worker runs
-        console.log('[SLACK_POST] Triggering worker to process enqueued message');
-        const workerUrl = new URL(request.url);
-        workerUrl.pathname = '/api/slack/rag-worker';
-        
-        // Ensure the worker secret key is properly included
-        const workerSecretKey = process.env.WORKER_SECRET_KEY || '';
-        
-        // Trigger the worker without waiting for it to complete
-        fetch(`${workerUrl.origin}/api/slack/rag-worker?key=${workerSecretKey}`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${workerSecretKey}`
-          }
-        }).catch(error => {
-          console.error('[SLACK_POST] Failed to trigger worker:', error);
-        });
-        
-        // DON'T trigger the worker with raw Slack event - the handler functions 
-        // will properly enqueue the message and trigger the worker in the right format
-        
-        // Immediately respond to Slack to acknowledge receipt
-        console.log('[SLACK_POST] Sending acknowledge response to Slack');
-        return response;
+        // Use setTimeout with 0 delay to ensure this runs after the response is sent
+        setTimeout(() => {
+          handleDirectMessage(event)
+            .catch(error => console.error('[SLACK_POST] Async error in direct message handler:', error));
+        }, 0);
       } else {
         console.log(`[SLACK_POST] Ignoring unsupported event type: ${event.type}`);
-        // Immediately respond to Slack to acknowledge receipt
-        console.log('[SLACK_POST] Sending acknowledge response to Slack');
-        return NextResponse.json({ ok: true });
       }
+      
+      // Immediately respond to Slack to acknowledge receipt
+      console.log('[SLACK_POST] Sending acknowledge response to Slack');
+      return response;
     }
     
     // Handle other event types or return an error
@@ -591,6 +475,13 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: 'Unhandled request type' }, { status: 400 });
   } catch (error) {
     console.error('[SLACK_POST] Unhandled error in Slack POST handler:', error);
+    if (error instanceof Error) {
+      console.error('[SLACK_POST] Error details:', {
+        name: error.name,
+        message: error.message,
+        stack: error.stack
+      });
+    }
     return NextResponse.json({ error: 'Internal server error' }, { status: 500 });
   }
 } 
