@@ -11,11 +11,7 @@ const nextConfig = {
   // External packages that need to be transpiled
   transpilePackages: ['@slack/web-api', '@slack/bolt'],
   // External packages for server components
-  serverExternalPackages: ['@pinecone-database/pinecone'],
-  // Set maximum function duration to 60 seconds
-  experimental: {
-    serverActionsBodySizeLimit: '5mb'
-  },
+  serverComponentsExternalPackages: ['@pinecone-database/pinecone'],
   // Add webpack configuration to handle Node.js built-in modules
   webpack: (config, { isServer }) => {
     // If we're building for the server
