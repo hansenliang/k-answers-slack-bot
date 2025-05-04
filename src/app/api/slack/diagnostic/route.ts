@@ -251,7 +251,10 @@ export async function POST(request: Request) {
         
       case 'test_queue_write':
         try {
-          // Test queue write operations
+          // Test queue write operations with proper format
+          console.log(`[DIAGNOSTIC] Testing queue write with properly formatted message`);
+          
+          // Create a test message with the proper structure for a SlackMessageJob
           const testMessage = {
             channelId: channel || 'test-channel',
             userId: 'test-user',
@@ -259,19 +262,20 @@ export async function POST(request: Request) {
             eventTs: Date.now().toString()
           };
           
-          console.log(`[DIAGNOSTIC] Attempting to enqueue test message:`, testMessage);
+          console.log(`[DIAGNOSTIC] Using Upstash Queue's sendMessage method instead of direct Redis access`);
           
-          // Try to directly push to Redis
-          await redis.rpush('queue:slack-message-queue:waiting', JSON.stringify(testMessage));
+          // Use the proper queue method instead of direct Redis access
+          const result = await slackMessageQueue.sendMessage(testMessage);
           
-          // Verify it was added
+          // Verify queue length after sending
           const queueLength = await redis.llen('queue:slack-message-queue:waiting');
           
           return NextResponse.json({
             success: true,
             queueWriteStatus: {
               messageAdded: true,
-              newLength: queueLength
+              newLength: queueLength,
+              sendResult: result
             }
           });
         } catch (e) {
@@ -569,6 +573,62 @@ export async function POST(request: Request) {
           });
         } catch (e) {
           console.error('[DIAGNOSTIC] Error in emergency queue repair:', e);
+          return NextResponse.json({
+            success: false,
+            error: e instanceof Error ? e.message : String(e)
+          }, { status: 500 });
+        }
+        
+      case 'direct_process_job':
+        try {
+          // Create and directly process a job through the worker
+          console.log('[DIAGNOSTIC] Creating a job for direct processing');
+          
+          if (!channel) {
+            return NextResponse.json({ error: 'Missing channel parameter' }, { status: 400 });
+          }
+          
+          // Create a test message
+          const directJob = {
+            channelId: channel,
+            userId: 'direct-test-user',
+            questionText: message || 'This is a directly processed test message',
+            eventTs: Date.now().toString()
+          };
+          
+          console.log(`[DIAGNOSTIC] Direct job created: ${JSON.stringify(directJob)}`);
+          
+          // Get the base URL for the worker
+          const baseUrl = process.env.VERCEL_URL 
+            ? `https://${process.env.VERCEL_URL}` 
+            : (process.env.DEPLOYMENT_URL || new URL(request.url).origin);
+          
+          const workerUrl = `${baseUrl}/api/slack/rag-worker`;
+          console.log(`[DIAGNOSTIC] Sending job directly to worker at ${workerUrl}`);
+          
+          // Send the job to the worker endpoint
+          const workerResponse = await fetch(`${workerUrl}?key=${process.env.WORKER_SECRET_KEY}`, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'X-Diagnostic-Source': 'direct-job'
+            },
+            body: JSON.stringify({
+              type: 'direct_job',
+              job: directJob
+            })
+          });
+          
+          // Get the worker response
+          const workerResult = await workerResponse.json();
+          
+          return NextResponse.json({
+            success: true,
+            directJob,
+            workerResult
+          });
+        } catch (e) {
+          console.error('[DIAGNOSTIC] Direct job processing failed:', e);
           return NextResponse.json({
             success: false,
             error: e instanceof Error ? e.message : String(e)
