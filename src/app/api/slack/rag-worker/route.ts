@@ -96,6 +96,25 @@ async function sendSlackMessage({ channel, text, thread_ts }: { channel: string,
       throw new Error('Slack web client is not initialized');
     }
     
+    // Validate thread_ts format if provided
+    if (thread_ts) {
+      // Slack timestamps should be in the format "1234567890.123456" (seconds.microseconds)
+      if (!thread_ts.includes('.') || !/^\d+\.\d+$/.test(thread_ts)) {
+        console.warn('[SLACK] Invalid thread_ts format detected: ' + thread_ts);
+        
+        // If it looks like milliseconds, convert it to Slack format
+        if (/^\d{13,}$/.test(thread_ts)) {
+          const seconds = Math.floor(parseInt(thread_ts) / 1000);
+          const microseconds = parseInt(thread_ts) % 1000 * 1000;
+          thread_ts = `${seconds}.${microseconds}`;
+          console.log('[SLACK] Converted timestamp to Slack format: ' + thread_ts);
+        } else {
+          // Log warning but continue with the value
+          console.warn('[SLACK] Proceeding with potentially invalid thread_ts');
+        }
+      }
+    }
+    
     // Post message to Slack
     const result = await webClient.chat.postMessage({
       channel,
@@ -145,10 +164,15 @@ async function processJob(job: SlackMessageJob): Promise<boolean> {
     const waitingMessagePromise = new Promise<void>((resolve) => {
       waitingMessageTimeoutId = setTimeout(async () => {
         try {
+          // IMPORTANT: Use the correct thread_ts format directly without modifying it
+          // Ensure we're using the original Slack timestamp format
+          const thread_ts = job.threadTs || job.eventTs;
+          console.log(`[WORKER:${jobId}] Using thread_ts: ${thread_ts} for waiting message`);
+          
           await sendSlackMessage({
             channel: job.channelId,
             text: 'I\'m working on your question. This might take a minute...',
-            thread_ts: job.threadTs || job.eventTs
+            thread_ts: thread_ts
           });
           waitingMessageSent = true;
           console.log(`[WORKER:${jobId}] Sent waiting message to user`);
@@ -174,11 +198,16 @@ async function processJob(job: SlackMessageJob): Promise<boolean> {
       const processingTime = Date.now() - startTime;
       console.log(`[WORKER:${jobId}] Successfully processed job in ${processingTime}ms`);
       
+      // IMPORTANT: Use the correct thread_ts format directly without modifying it
+      // Ensure we're using the original Slack timestamp format
+      const thread_ts = job.threadTs || job.eventTs;
+      console.log(`[WORKER:${jobId}] Using thread_ts: ${thread_ts} for final response`);
+      
       // Success - assuming the result is something we can send back
       await sendSlackMessage({
         channel: job.channelId,
         text: result,
-        thread_ts: job.threadTs || job.eventTs
+        thread_ts: thread_ts
       });
       
       console.log(`[WORKER:${jobId}] Successfully sent response to user`);
@@ -190,13 +219,18 @@ async function processJob(job: SlackMessageJob): Promise<boolean> {
       
       console.error(`[WORKER:${jobId}] Error during processing:`, error);
       
+      // IMPORTANT: Use the correct thread_ts format directly without modifying it
+      // Ensure we're using the original Slack timestamp format
+      const thread_ts = job.threadTs || job.eventTs;
+      console.log(`[WORKER:${jobId}] Using thread_ts: ${thread_ts} for error message`);
+      
       // If we already sent a waiting message, update it to show the error
       // Otherwise send a new error message
       try {
         await sendSlackMessage({
           channel: job.channelId,
           text: `I'm sorry, I encountered an error while processing your request. Please try again later.`,
-          thread_ts: job.threadTs || job.eventTs
+          thread_ts: thread_ts
         });
         console.log(`[WORKER:${jobId}] Sent error message to user`);
       } catch (slackError) {

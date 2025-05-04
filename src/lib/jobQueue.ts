@@ -1,9 +1,6 @@
 import { Queue } from '@upstash/queue';
 import { Redis } from '@upstash/redis';
 
-// Import Redis directly to avoid type conflicts for fallback methods
-import { Redis as DirectRedis } from '@upstash/redis';
-
 // Define the job structure
 export interface SlackMessageJob {
   channelId: string;
@@ -54,6 +51,7 @@ const redis = new Redis({
 });
 
 // Initialize the Upstash Queue
+// @ts-ignore - Ignoring the type mismatch between Redis instances
 export const slackMessageQueue = new Queue({
   redis,
   queueName: 'slack-message-queue',
@@ -64,6 +62,9 @@ export const slackMessageQueue = new Queue({
 export async function enqueueSlackMessage(job: SlackMessageJob): Promise<boolean> {
   const jobId = `${job.userId}-${job.eventTs.substring(0, 8)}`;
   console.log(`[JOB_QUEUE:${jobId}] Enqueueing message from user ${job.userId} with text "${job.questionText.substring(0, 30)}..."`);
+  
+  // Validate and fix timestamp formats
+  job = validateSlackTimestamps(job);
   
   try {
     // First verify Redis connection
@@ -122,6 +123,40 @@ export async function enqueueSlackMessage(job: SlackMessageJob): Promise<boolean
     console.error(`[JOB_QUEUE:${jobId}] Redis config - URL starts with ${redisUrl.substring(0, 8)}, token length: ${redisToken.length}`);
     return false;
   }
+}
+
+// Helper function to ensure timestamps are in Slack's expected format
+function validateSlackTimestamps(job: SlackMessageJob): SlackMessageJob {
+  // Make a copy to avoid mutating the original
+  const validatedJob = { ...job };
+  
+  // Validate eventTs format (should be in Slack's timestamp format: 1234567890.123456)
+  if (validatedJob.eventTs && !validatedJob.eventTs.includes('.')) {
+    console.log(`[JOB_QUEUE] Fixing eventTs format: ${validatedJob.eventTs}`);
+    
+    // If it's a millisecond timestamp, convert to Slack format
+    if (/^\d{13,}$/.test(validatedJob.eventTs)) {
+      const seconds = Math.floor(parseInt(validatedJob.eventTs) / 1000);
+      const microseconds = parseInt(validatedJob.eventTs) % 1000 * 1000;
+      validatedJob.eventTs = `${seconds}.${microseconds}`;
+      console.log(`[JOB_QUEUE] Converted eventTs to Slack format: ${validatedJob.eventTs}`);
+    }
+  }
+  
+  // Validate threadTs format if present
+  if (validatedJob.threadTs && !validatedJob.threadTs.includes('.')) {
+    console.log(`[JOB_QUEUE] Fixing threadTs format: ${validatedJob.threadTs}`);
+    
+    // If it's a millisecond timestamp, convert to Slack format
+    if (/^\d{13,}$/.test(validatedJob.threadTs)) {
+      const seconds = Math.floor(parseInt(validatedJob.threadTs) / 1000);
+      const microseconds = parseInt(validatedJob.threadTs) % 1000 * 1000;
+      validatedJob.threadTs = `${seconds}.${microseconds}`;
+      console.log(`[JOB_QUEUE] Converted threadTs to Slack format: ${validatedJob.threadTs}`);
+    }
+  }
+  
+  return validatedJob;
 }
 
 // Function to process a message job from the queue
