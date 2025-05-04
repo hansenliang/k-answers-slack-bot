@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import { Redis } from '@upstash/redis';
 import { SlackMessageJob, slackMessageQueue } from '@/lib/jobQueue';
 import { WebClient } from '@slack/web-api';
+import { queryRag } from '@/lib/rag';
 
 // Define the runtime as nodejs to support fs, path, and other Node.js core modules
 export const runtime = 'nodejs';
@@ -64,18 +65,6 @@ async function sendSlackMessage({ channel, text, thread_ts }: { channel: string,
     
     throw error;
   }
-}
-
-// Query the RAG system (this would be your actual implementation)
-async function queryRag(question: string): Promise<string> {
-  console.log(`[RAG] Querying RAG for question: "${question}"`);
-  
-  // This is where you'd implement your actual RAG query logic
-  // For now, we'll simulate a delay and return a simple response
-  await new Promise(resolve => setTimeout(resolve, 2000 + Math.random() * 3000));
-  
-  console.log(`[RAG] RAG processing complete`);
-  return `Here is the answer to your question: "${question}".\n\nThis is a placeholder response. Please implement actual RAG query logic.`;
 }
 
 // Process a job from the queue
