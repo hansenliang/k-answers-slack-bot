@@ -192,6 +192,201 @@ export async function POST(request: Request) {
           }, { status: 500 });
         }
         
+      case 'test_redis_connection':
+        try {
+          // Basic Redis connection test
+          const pingResult = await redis.ping();
+          console.log(`[DIAGNOSTIC] Redis ping result: ${pingResult}`);
+          
+          return NextResponse.json({
+            success: true,
+            redisStatus: {
+              ping: pingResult,
+              url: redisUrl.substring(0, 10) + '...',
+              tokenPresent: !!redisToken
+            }
+          });
+        } catch (e) {
+          console.error('[DIAGNOSTIC] Redis connection test failed:', e);
+          const errorMessage = e instanceof Error ? e.message : String(e);
+          return NextResponse.json({
+            success: false,
+            error: errorMessage
+          }, { status: 500 });
+        }
+        
+      case 'test_queue_read':
+        try {
+          // Test queue read operations
+          const queueLength = await redis.llen('queue:slack-message-queue:waiting');
+          console.log(`[DIAGNOSTIC] Queue length: ${queueLength}`);
+          
+          // Try to peek at first few items
+          let queueItems = [];
+          if (queueLength > 0) {
+            try {
+              queueItems = await redis.lrange('queue:slack-message-queue:waiting', 0, 2);
+              console.log(`[DIAGNOSTIC] First queue items:`, queueItems);
+            } catch (peekError) {
+              console.error('[DIAGNOSTIC] Error peeking at queue:', peekError);
+            }
+          }
+          
+          return NextResponse.json({
+            success: true,
+            queueStatus: {
+              length: queueLength,
+              items: queueItems,
+              queueExists: queueLength !== null
+            }
+          });
+        } catch (e) {
+          console.error('[DIAGNOSTIC] Queue read test failed:', e);
+          const errorMessage = e instanceof Error ? e.message : String(e);
+          return NextResponse.json({
+            success: false,
+            error: errorMessage
+          }, { status: 500 });
+        }
+        
+      case 'test_queue_write':
+        try {
+          // Test queue write operations
+          const testMessage = {
+            channelId: channel || 'test-channel',
+            userId: 'test-user',
+            questionText: message || 'This is a test message',
+            eventTs: Date.now().toString()
+          };
+          
+          console.log(`[DIAGNOSTIC] Attempting to enqueue test message:`, testMessage);
+          
+          // Try to directly push to Redis
+          await redis.rpush('queue:slack-message-queue:waiting', JSON.stringify(testMessage));
+          
+          // Verify it was added
+          const queueLength = await redis.llen('queue:slack-message-queue:waiting');
+          
+          return NextResponse.json({
+            success: true,
+            queueWriteStatus: {
+              messageAdded: true,
+              newLength: queueLength
+            }
+          });
+        } catch (e) {
+          console.error('[DIAGNOSTIC] Queue write test failed:', e);
+          const errorMessage = e instanceof Error ? e.message : String(e);
+          return NextResponse.json({
+            success: false,
+            error: errorMessage
+          }, { status: 500 });
+        }
+        
+      case 'test_enqueue_message':
+        try {
+          // Test the actual enqueue function from jobQueue.ts
+          if (!channel) {
+            return NextResponse.json({ error: 'Missing channel parameter' }, { status: 400 });
+          }
+          
+          console.log(`[DIAGNOSTIC] Testing enqueueSlackMessage with channel ${channel}`);
+          
+          const testJob = {
+            channelId: channel,
+            userId: 'test-user',
+            questionText: message || 'This is a diagnostic test message',
+            threadTs: undefined,
+            eventTs: Date.now().toString()
+          };
+          
+          // Import the function directly from jobQueue
+          const { enqueueSlackMessage } = await import('@/lib/jobQueue');
+          const enqueued = await enqueueSlackMessage(testJob);
+          
+          if (enqueued) {
+            console.log(`[DIAGNOSTIC] Successfully enqueued test message`);
+          } else {
+            console.error(`[DIAGNOSTIC] Failed to enqueue test message`);
+          }
+          
+          return NextResponse.json({
+            success: enqueued,
+            enqueuedJob: testJob
+          });
+        } catch (e) {
+          console.error('[DIAGNOSTIC] Enqueue message test failed:', e);
+          const errorMessage = e instanceof Error ? e.message : String(e);
+          return NextResponse.json({
+            success: false,
+            error: errorMessage
+          }, { status: 500 });
+        }
+        
+      case 'test_e2e':
+        try {
+          // End-to-end test: enqueue a message and trigger the worker
+          if (!channel) {
+            return NextResponse.json({ error: 'Missing channel parameter' }, { status: 400 });
+          }
+          
+          console.log(`[DIAGNOSTIC] Running E2E test with channel ${channel}`);
+          
+          // Step 1: Enqueue a test message
+          const testJob = {
+            channelId: channel,
+            userId: 'test-user',
+            questionText: message || 'This is an end-to-end test message',
+            threadTs: undefined,
+            eventTs: Date.now().toString()
+          };
+          
+          // Import the function directly from jobQueue
+          const { enqueueSlackMessage } = await import('@/lib/jobQueue');
+          const enqueued = await enqueueSlackMessage(testJob);
+          
+          if (!enqueued) {
+            console.error(`[DIAGNOSTIC] E2E test failed at message enqueue step`);
+            return NextResponse.json({
+              success: false,
+              error: 'Failed to enqueue test message'
+            }, { status: 500 });
+          }
+          
+          console.log(`[DIAGNOSTIC] E2E test: Message enqueued successfully`);
+          
+          // Step 2: Trigger the worker to process the message
+          const workerUrl = new URL(request.url);
+          workerUrl.pathname = '/api/slack/rag-worker';
+          
+          console.log(`[DIAGNOSTIC] E2E test: Triggering worker at ${workerUrl}`);
+          
+          const workerResponse = await fetch(workerUrl.toString(), {
+            method: 'GET',
+            headers: {
+              'Authorization': `Bearer ${process.env.WORKER_SECRET_KEY}`
+            }
+          });
+          
+          const workerData = await workerResponse.json();
+          
+          console.log(`[DIAGNOSTIC] E2E test: Worker response received:`, workerData);
+          
+          // Return the combined results
+          return NextResponse.json({
+            success: true,
+            enqueueResult: { success: enqueued, job: testJob },
+            workerResult: workerData
+          });
+        } catch (e) {
+          console.error('[DIAGNOSTIC] E2E test failed:', e);
+          const errorMessage = e instanceof Error ? e.message : String(e);
+          return NextResponse.json({
+            success: false,
+            error: errorMessage
+          }, { status: 500 });
+        }
+        
       default:
         return NextResponse.json({ error: 'Unknown action' }, { status: 400 });
     }

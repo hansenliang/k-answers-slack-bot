@@ -20,7 +20,7 @@ console.log('[WORKER_INIT] WebClient initialized');
 async function processJob(job: SlackMessageJob): Promise<boolean> {
   const startTime = Date.now();
   const jobId = `${job.userId}-${job.eventTs.substring(0, 8)}`;
-  console.log(`[WORKER:${jobId}] Starting to process job for user ${job.userId}, channel ${job.channelId}`);
+  console.log(`[WORKER:${jobId}] Starting to process job for user ${job.userId}, channel ${job.channelId}, text: "${job.questionText.substring(0, 30)}..."`);
   
   // Set up a timeout for the entire processing
   const timeoutPromise = new Promise<never>((_, reject) => {
@@ -122,15 +122,20 @@ async function processJob(job: SlackMessageJob): Promise<boolean> {
 async function hasMoreJobs(): Promise<number> {
   try {
     // Access Redis directly to check queue size
+    console.log('[WORKER] Checking queue size...');
     const redis = new Redis({
       url: process.env.UPSTASH_REDIS_URL || '',
       token: process.env.UPSTASH_REDIS_TOKEN || '',
     });
     
     const count = await redis.llen('queue:slack-message-queue:waiting');
+    console.log(`[WORKER] Queue size check result: ${count} jobs remaining`);
     return count;
   } catch (error) {
     console.error('[WORKER] Error checking queue size:', error);
+    if (error instanceof Error) {
+      console.error(`[WORKER] Queue check error details: ${error.message}`);
+    }
     return 0;
   }
 }
@@ -221,11 +226,33 @@ async function handleWorkerRequest(request: Request) {
     const isCronJob = request.headers.get('x-vercel-cron') === 'true';
     const isSlackEvent = request.headers.get('X-Slack-Event') === 'true';
     
+    // Check for direct trigger from Slack events endpoint
+    let isDirectTrigger = false;
+    let requestBody;
+    
+    try {
+      const contentType = request.headers.get('content-type');
+      if (contentType && contentType.includes('application/json')) {
+        const rawBody = await request.text();
+        if (rawBody) {
+          requestBody = JSON.parse(rawBody);
+          isDirectTrigger = requestBody?.type === 'direct_trigger';
+          
+          if (isDirectTrigger) {
+            console.log(`[WORKER] Direct trigger detected, jobId: ${requestBody.jobId || 'unknown'}`);
+          }
+        }
+      }
+    } catch (parseError) {
+      console.error('[WORKER] Error parsing request body:', parseError);
+      // Continue processing - this isn't fatal
+    }
+    
     const expectedKey = process.env.WORKER_SECRET_KEY || '';
     
     // Log auth details (but protect the full key)
     console.log(`[WORKER] Auth details: Query key present: ${!!queryKey}, Bearer token present: ${!!bearerToken}, Expected key present: ${!!expectedKey}`);
-    console.log(`[WORKER] Request type: ${isCronJob ? 'Vercel cron' : isChained ? 'Chained call' : isSlackEvent ? 'Slack event' : 'External call'}`);
+    console.log(`[WORKER] Request type: ${isCronJob ? 'Vercel cron' : isChained ? 'Chained call' : isDirectTrigger ? 'Direct trigger' : isSlackEvent ? 'Slack event' : 'External call'}`);
     
     // Check authorization - accept either query param or bearer token
     const isAuthorized = isCronJob || 
@@ -260,9 +287,21 @@ async function handleWorkerRequest(request: Request) {
         token: redisToken,
       });
       
+      // Add more debugging about the Redis connection
+      console.log(`[WORKER] Redis URL format: ${redisUrl.startsWith('https://') ? 'valid' : 'invalid'}`);
+      if (redisUrl.includes('.upstash.io')) {
+        console.log('[WORKER] Redis URL contains upstash.io domain');
+      } else {
+        console.error('[WORKER] Redis URL does not contain upstash.io domain');
+      }
+      
       // Test Redis connection by getting a simple value
-      await redis.ping();
-      console.log(`[WORKER] Redis connection test successful`);
+      const pingResponse = await redis.ping();
+      console.log(`[WORKER] Redis connection test successful, response: ${pingResponse}`);
+      
+      // Try to check the queue
+      const queueLength = await redis.llen('queue:slack-message-queue:waiting');
+      console.log(`[WORKER] Initial queue size: ${queueLength}`);
     } catch (redisError) {
       console.error('[WORKER] Redis connection test failed:', redisError);
       if (redisError instanceof Error) {
@@ -287,11 +326,64 @@ async function handleWorkerRequest(request: Request) {
       
       if (!message) {
         console.log('[WORKER] No messages in queue to process');
-        return NextResponse.json({ status: 'no_jobs' });
+        
+        // Additional check - try direct Redis access to verify
+        try {
+          const directRedis = new Redis({
+            url: process.env.UPSTASH_REDIS_URL || '',
+            token: process.env.UPSTASH_REDIS_TOKEN || '',
+          });
+          
+          const queueLength = await directRedis.llen('queue:slack-message-queue:waiting');
+          console.log(`[WORKER] Double-check queue length via direct Redis: ${queueLength}`);
+          
+          if (queueLength > 0) {
+            console.error('[WORKER] Queue reported as empty by Upstash Queue SDK, but direct Redis check shows items. Potential SDK issue.');
+          }
+        } catch (directError) {
+          console.error('[WORKER] Failed direct Redis queue check:', directError);
+        }
+        
+        // If this is a direct trigger and there are no messages, it might be a race condition - the message
+        // might still be in the process of being enqueued. Try waiting a short time and then checking again.
+        if (isDirectTrigger) {
+          console.log('[WORKER] Direct trigger with no messages - waiting briefly to check again');
+          await new Promise(resolve => setTimeout(resolve, 1000)); // Wait 1 second
+          
+          // Try to receive again
+          message = await slackMessageQueue.receiveMessage<SlackMessageJob>();
+          
+          if (!message) {
+            console.log('[WORKER] Still no message after waiting - possible race condition with enqueuing');
+            
+            // Try direct Redis check one more time
+            try {
+              const directRedis = new Redis({
+                url: process.env.UPSTASH_REDIS_URL || '',
+                token: process.env.UPSTASH_REDIS_TOKEN || '',
+              });
+              
+              const queueItems = await directRedis.lrange('queue:slack-message-queue:waiting', 0, 0);
+              console.log(`[WORKER] Final check for queue content: ${queueItems.length > 0 ? 'Items exist' : 'Queue empty'}`);
+              
+              if (queueItems.length > 0) {
+                console.error('[WORKER] Queue has items but receiveMessage is not retrieving them. Possible SDK issue.');
+              }
+            } catch (finalError) {
+              console.error('[WORKER] Final queue check failed:', finalError);
+            }
+          } else {
+            console.log(`[WORKER] Found message after waiting, stream ID: ${message.streamId}`);
+          }
+        }
+        
+        if (!message) {
+          return NextResponse.json({ status: 'no_jobs' });
+        }
       }
       
       const jobId = `${message.body.userId}-${message.body.eventTs.substring(0, 8)}`;
-      console.log(`[WORKER] Retrieved message from queue: ${JSON.stringify(message.body)}, stream ID: ${message.streamId}`);
+      console.log(`[WORKER] Retrieved message from queue for user ${message.body.userId}, text: "${message.body.questionText.substring(0, 30)}...", stream ID: ${message.streamId}`);
       
       // Process the job
       console.log(`[WORKER:${jobId}] Starting job processing`);
@@ -333,6 +425,19 @@ async function handleWorkerRequest(request: Request) {
       
     } catch (queueError) {
       console.error('[WORKER] Failed to retrieve message from queue:', queueError);
+      
+      // Enhanced error logging
+      if (queueError instanceof Error) {
+        console.error(`[WORKER] Error type: ${queueError.name}`);
+        console.error(`[WORKER] Error message: ${queueError.message}`);
+        if (queueError.stack) {
+          console.error(`[WORKER] Error stack: ${queueError.stack}`);
+        }
+        if ('cause' in queueError) {
+          console.error(`[WORKER] Error cause:`, queueError.cause);
+        }
+      }
+      
       return NextResponse.json({ 
         status: 'error',
         message: 'Failed to access job queue',
@@ -341,6 +446,16 @@ async function handleWorkerRequest(request: Request) {
     }
   } catch (error) {
     console.error('[WORKER] Unhandled error in worker:', error);
+    
+    // Enhanced error logging
+    if (error instanceof Error) {
+      console.error(`[WORKER] Error type: ${error.name}`);
+      console.error(`[WORKER] Error message: ${error.message}`);
+      if (error.stack) {
+        console.error(`[WORKER] Error stack: ${error.stack}`);
+      }
+    }
+    
     return NextResponse.json({ 
       status: 'error',
       message: 'Internal server error'

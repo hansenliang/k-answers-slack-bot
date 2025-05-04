@@ -187,7 +187,8 @@ const handleAppMention = async (event: any) => {
     });
 
     // Enqueue the job for background processing instead of processing inline
-    console.log(`[APP_MENTION] Enqueueing job for user ${userId}`);
+    const jobId = `${event.user}-${event.event_ts.substring(0, 8)}`;
+    console.log(`[APP_MENTION:${jobId}] Enqueueing job for user ${event.user}`);
     const job = {
       channelId,
       userId,
@@ -196,18 +197,89 @@ const handleAppMention = async (event: any) => {
       eventTs: event.event_ts
     };
     
-    const enqueued = await enqueueSlackMessage(job);
-    
-    if (enqueued) {
-      console.log(`[APP_MENTION] Successfully enqueued job for ${userId}`);
-    } else {
-      console.error(`[APP_MENTION] Failed to enqueue job for ${userId}`);
-      // Send failure notification to user
-      await webClient.chat.postMessage({
-        channel: channelId,
-        text: "I encountered an error while processing your request. Please try again later.",
-        thread_ts: threadTs,
-      });
+    try {
+      console.log(`[APP_MENTION:${jobId}] Calling enqueueSlackMessage`);
+      const enqueued = await enqueueSlackMessage(job);
+      
+      if (enqueued) {
+        console.log(`[APP_MENTION:${jobId}] Successfully enqueued job for ${userId}`);
+        
+        // Verify queue status
+        try {
+          const { Redis } = await import('@upstash/redis');
+          const redis = new Redis({
+            url: process.env.UPSTASH_REDIS_URL || '',
+            token: process.env.UPSTASH_REDIS_TOKEN || '',
+          });
+          
+          // Check queue length
+          const queueLength = await redis.llen('queue:slack-message-queue:waiting');
+          console.log(`[APP_MENTION:${jobId}] Queue length after enqueue: ${queueLength}`);
+          
+          // If the queue is empty despite successful enqueue, something is wrong
+          if (queueLength === 0) {
+            console.error(`[APP_MENTION:${jobId}] Queue is empty after successful enqueue. This indicates a potential issue with the queue.`);
+          }
+        } catch (redisError) {
+          console.error(`[APP_MENTION:${jobId}] Failed to verify queue status:`, redisError);
+        }
+        
+        // Now immediately trigger the worker to process this job
+        console.log(`[APP_MENTION:${jobId}] Triggering worker endpoint`);
+        try {
+          const workerUrl = new URL(process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : 'http://localhost:3000');
+          workerUrl.pathname = '/api/slack/rag-worker';
+          
+          const workerSecretKey = process.env.WORKER_SECRET_KEY || '';
+          
+          // Fire and forget - don't await the result
+          fetch(`${workerUrl.origin}/api/slack/rag-worker?key=${workerSecretKey}`, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'Authorization': `Bearer ${workerSecretKey}`
+            },
+            body: JSON.stringify({ type: 'direct_trigger', jobId })
+          }).catch(error => {
+            console.error(`[APP_MENTION:${jobId}] Failed to trigger worker:`, error);
+          });
+          
+          console.log(`[APP_MENTION:${jobId}] Worker trigger request sent`);
+        } catch (workerError) {
+          console.error(`[APP_MENTION:${jobId}] Error triggering worker:`, workerError);
+        }
+      } else {
+        console.error(`[APP_MENTION:${jobId}] Failed to enqueue job for ${userId}`);
+        
+        // Log environment variables status (safely)
+        console.error(`[APP_MENTION:${jobId}] Environment check - UPSTASH_REDIS_URL: ${!!process.env.UPSTASH_REDIS_URL}, UPSTASH_REDIS_TOKEN: ${!!process.env.UPSTASH_REDIS_TOKEN}`);
+        
+        // Send failure notification to user
+        await webClient.chat.postMessage({
+          channel: channelId,
+          text: "I encountered an error while processing your request. Please try again later.",
+          thread_ts: threadTs,
+        });
+      }
+    } catch (enqueueError) {
+      console.error(`[APP_MENTION:${jobId}] Exception during enqueue:`, enqueueError);
+      if (enqueueError instanceof Error) {
+        console.error(`[APP_MENTION:${jobId}] Error message: ${enqueueError.message}`);
+        if (enqueueError.stack) {
+          console.error(`[APP_MENTION:${jobId}] Stack trace: ${enqueueError.stack}`);
+        }
+      }
+      
+      // Send error notification
+      try {
+        await webClient.chat.postMessage({
+          channel: channelId,
+          text: "I encountered an error while processing your request. Please try again later.",
+          thread_ts: threadTs,
+        });
+      } catch (postError) {
+        console.error(`[APP_MENTION:${jobId}] Failed to send error message:`, postError);
+      }
     }
   } catch (error) {
     console.error('[APP_MENTION] Error handling app_mention event:', error);
@@ -279,7 +351,8 @@ const handleDirectMessage = async (event: any) => {
     });
 
     // Enqueue the job for background processing instead of processing inline
-    console.log(`[DIRECT_MSG] Enqueueing job for user ${userId}`);
+    const jobId = `${event.user}-${event.event_ts.substring(0, 8)}`;
+    console.log(`[DIRECT_MSG:${jobId}] Enqueueing job for user ${event.user}`);
     const job = {
       channelId,
       userId,
@@ -288,18 +361,89 @@ const handleDirectMessage = async (event: any) => {
       eventTs: event.event_ts
     };
     
-    const enqueued = await enqueueSlackMessage(job);
-    
-    if (enqueued) {
-      console.log(`[DIRECT_MSG] Successfully enqueued job for ${userId}`);
-    } else {
-      console.error(`[DIRECT_MSG] Failed to enqueue job for ${userId}`);
-      // Send failure notification to user
-      await webClient.chat.postMessage({
-        channel: channelId,
-        text: "I encountered an error while processing your request. Please try again later.",
-        thread_ts: event.thread_ts,
-      });
+    try {
+      console.log(`[DIRECT_MSG:${jobId}] Calling enqueueSlackMessage`);
+      const enqueued = await enqueueSlackMessage(job);
+      
+      if (enqueued) {
+        console.log(`[DIRECT_MSG:${jobId}] Successfully enqueued job for ${userId}`);
+        
+        // Verify queue status
+        try {
+          const { Redis } = await import('@upstash/redis');
+          const redis = new Redis({
+            url: process.env.UPSTASH_REDIS_URL || '',
+            token: process.env.UPSTASH_REDIS_TOKEN || '',
+          });
+          
+          // Check queue length
+          const queueLength = await redis.llen('queue:slack-message-queue:waiting');
+          console.log(`[DIRECT_MSG:${jobId}] Queue length after enqueue: ${queueLength}`);
+          
+          // If the queue is empty despite successful enqueue, something is wrong
+          if (queueLength === 0) {
+            console.error(`[DIRECT_MSG:${jobId}] Queue is empty after successful enqueue. This indicates a potential issue with the queue.`);
+          }
+        } catch (redisError) {
+          console.error(`[DIRECT_MSG:${jobId}] Failed to verify queue status:`, redisError);
+        }
+        
+        // Now immediately trigger the worker to process this job
+        console.log(`[DIRECT_MSG:${jobId}] Triggering worker endpoint`);
+        try {
+          const workerUrl = new URL(process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : 'http://localhost:3000');
+          workerUrl.pathname = '/api/slack/rag-worker';
+          
+          const workerSecretKey = process.env.WORKER_SECRET_KEY || '';
+          
+          // Fire and forget - don't await the result
+          fetch(`${workerUrl.origin}/api/slack/rag-worker?key=${workerSecretKey}`, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'Authorization': `Bearer ${workerSecretKey}`
+            },
+            body: JSON.stringify({ type: 'direct_trigger', jobId })
+          }).catch(error => {
+            console.error(`[DIRECT_MSG:${jobId}] Failed to trigger worker:`, error);
+          });
+          
+          console.log(`[DIRECT_MSG:${jobId}] Worker trigger request sent`);
+        } catch (workerError) {
+          console.error(`[DIRECT_MSG:${jobId}] Error triggering worker:`, workerError);
+        }
+      } else {
+        console.error(`[DIRECT_MSG:${jobId}] Failed to enqueue job for ${userId}`);
+        
+        // Log environment variables status (safely)
+        console.error(`[DIRECT_MSG:${jobId}] Environment check - UPSTASH_REDIS_URL: ${!!process.env.UPSTASH_REDIS_URL}, UPSTASH_REDIS_TOKEN: ${!!process.env.UPSTASH_REDIS_TOKEN}`);
+        
+        // Send failure notification to user
+        await webClient.chat.postMessage({
+          channel: channelId,
+          text: "I encountered an error while processing your request. Please try again later.",
+          thread_ts: event.thread_ts,
+        });
+      }
+    } catch (enqueueError) {
+      console.error(`[DIRECT_MSG:${jobId}] Exception during enqueue:`, enqueueError);
+      if (enqueueError instanceof Error) {
+        console.error(`[DIRECT_MSG:${jobId}] Error message: ${enqueueError.message}`);
+        if (enqueueError.stack) {
+          console.error(`[DIRECT_MSG:${jobId}] Stack trace: ${enqueueError.stack}`);
+        }
+      }
+      
+      // Send error notification
+      try {
+        await webClient.chat.postMessage({
+          channel: channelId,
+          text: "I encountered an error while processing your request. Please try again later.",
+          thread_ts: event.thread_ts,
+        });
+      } catch (postError) {
+        console.error(`[DIRECT_MSG:${jobId}] Failed to send error message:`, postError);
+      }
     }
   } catch (error) {
     console.error('[DIRECT_MSG] Error handling direct message event:', error);
