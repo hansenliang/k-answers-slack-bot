@@ -387,6 +387,194 @@ export async function POST(request: Request) {
           }, { status: 500 });
         }
         
+      case 'dump_queue_raw':
+        try {
+          // Directly dump the raw queue contents for inspection
+          console.log('[DIAGNOSTIC] Dumping raw queue contents');
+          
+          // First, get the queue length
+          const queueKey = 'queue:slack-message-queue:waiting';
+          const queueLength = await redis.llen(queueKey);
+          console.log(`[DIAGNOSTIC] Queue length: ${queueLength}`);
+          
+          // Get all items in the queue without removing them
+          const allItems = await redis.lrange(queueKey, 0, -1);
+          console.log(`[DIAGNOSTIC] Raw queue items: ${allItems.length}`);
+          
+          // Parse each item and extract essential info
+          const parsedItems = allItems.map((item, index) => {
+            try {
+              const parsedItem = JSON.parse(item);
+              // Return a simplified version with just key fields
+              return {
+                index,
+                streamId: parsedItem.streamId || 'missing',
+                bodyType: typeof parsedItem.body,
+                userId: parsedItem.body?.userId || 'unknown',
+                questionText: parsedItem.body?.questionText ? 
+                  `${parsedItem.body.questionText.substring(0, 30)}...` : 'missing',
+                format: Object.keys(parsedItem)
+              };
+            } catch (e) {
+              return {
+                index,
+                error: 'Failed to parse',
+                raw: item.substring(0, 100) + '...'
+              };
+            }
+          });
+          
+          return NextResponse.json({
+            success: true,
+            queueLength,
+            rawItemCount: allItems.length,
+            parsedItems,
+            // Include one complete raw item if available
+            sampleRawItem: allItems.length > 0 ? allItems[0] : null
+          });
+        } catch (e) {
+          console.error('[DIAGNOSTIC] Error dumping queue:', e);
+          return NextResponse.json({
+            success: false,
+            error: e instanceof Error ? e.message : String(e)
+          }, { status: 500 });
+        }
+        
+      case 'emergency_queue_repair':
+        try {
+          // Get queue status first
+          console.log('[DIAGNOSTIC] Running emergency queue repair');
+          const queueKey = 'queue:slack-message-queue:waiting';
+          const queueLength = await redis.llen(queueKey);
+          console.log(`[DIAGNOSTIC] Current queue length: ${queueLength}`);
+          
+          if (queueLength === 0) {
+            return NextResponse.json({
+              success: true,
+              message: 'Queue is already empty, no repair needed',
+              queueLength
+            });
+          }
+          
+          // Examine the first item
+          const items = await redis.lrange(queueKey, 0, 0);
+          let itemData = null;
+          let itemFormat = null;
+          
+          if (items.length > 0) {
+            try {
+              const parsedItem = JSON.parse(items[0]);
+              itemData = {
+                keys: Object.keys(parsedItem),
+                hasBody: !!parsedItem.body,
+                hasStreamId: !!parsedItem.streamId,
+                bodyType: typeof parsedItem.body
+              };
+              
+              // Check if it's a valid message format
+              if (parsedItem.body && typeof parsedItem.body === 'object' && 
+                  parsedItem.body.userId && parsedItem.body.questionText) {
+                itemFormat = 'valid';
+              } else {
+                itemFormat = 'invalid';
+              }
+            } catch (parseError) {
+              itemFormat = 'unparseable';
+            }
+          }
+          
+          // Get worker status
+          let workerResponse = null;
+          try {
+            // Get the base URL
+            const baseUrl = process.env.VERCEL_URL 
+              ? `https://${process.env.VERCEL_URL}` 
+              : (process.env.DEPLOYMENT_URL || new URL(request.url).origin);
+            
+            const workerUrl = `${baseUrl}/api/slack/rag-worker`;
+            
+            console.log(`[DIAGNOSTIC] Checking worker status at ${workerUrl}`);
+            workerResponse = await fetch(`${workerUrl}?key=${process.env.WORKER_SECRET_KEY}`, {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                'X-Diagnostic-Source': 'queue-repair'
+              }
+            }).then(res => res.json());
+          } catch (workerError) {
+            console.error('[DIAGNOSTIC] Failed to check worker:', workerError);
+          }
+          
+          // Determine action based on queue status
+          let repairAction = null;
+          let repairResult = null;
+          
+          if (itemFormat === 'invalid' || itemFormat === 'unparseable') {
+            // Remove bad message from queue
+            console.log('[DIAGNOSTIC] Removing invalid message from queue');
+            await redis.lpop(queueKey);
+            repairAction = 'removed_invalid_message';
+          } else if (queueLength > 0 && itemFormat === 'valid') {
+            // The queue has valid messages but they're not being processed
+            // Let's try to manually process one
+            console.log('[DIAGNOSTIC] Attempting to manually process one message');
+            try {
+              // Create a modified message with proper format
+              const firstItem = JSON.parse(items[0]);
+              const jobBody = firstItem.body;
+              
+              // Process this message directly
+              const baseUrl = process.env.VERCEL_URL 
+                ? `https://${process.env.VERCEL_URL}` 
+                : (process.env.DEPLOYMENT_URL || new URL(request.url).origin);
+              
+              // Create a special worker trigger request
+              const specialWorkerUrl = `${baseUrl}/api/slack/rag-worker`;
+              const specialWorkerResponse = await fetch(`${specialWorkerUrl}?key=${process.env.WORKER_SECRET_KEY}`, {
+                method: 'POST',
+                headers: {
+                  'Content-Type': 'application/json',
+                  'X-Diagnostic-Source': 'manual-message-process'
+                },
+                body: JSON.stringify({
+                  type: 'direct_job',
+                  job: jobBody
+                })
+              }).then(res => res.json());
+              
+              repairAction = 'manual_processing';
+              repairResult = specialWorkerResponse;
+              
+              // Remove this item from the queue
+              await redis.lrem(queueKey, 1, items[0]);
+            } catch (processError) {
+              console.error('[DIAGNOSTIC] Failed to manually process message:', processError);
+              repairAction = 'manual_processing_failed';
+              repairResult = processError instanceof Error ? processError.message : String(processError);
+            }
+          }
+          
+          // Final queue status
+          const newQueueLength = await redis.llen(queueKey);
+          
+          return NextResponse.json({
+            success: true,
+            initialQueueLength: queueLength,
+            finalQueueLength: newQueueLength,
+            firstItemFormat: itemFormat,
+            firstItemData: itemData,
+            workerStatus: workerResponse,
+            repairAction,
+            repairResult
+          });
+        } catch (e) {
+          console.error('[DIAGNOSTIC] Error in emergency queue repair:', e);
+          return NextResponse.json({
+            success: false,
+            error: e instanceof Error ? e.message : String(e)
+          }, { status: 500 });
+        }
+        
       default:
         return NextResponse.json({ error: 'Unknown action' }, { status: 400 });
     }

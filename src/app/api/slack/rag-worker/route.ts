@@ -229,6 +229,36 @@ async function handleWorkerRequest(request: Request) {
     // Log complete request information
     console.log(`[WORKER] Request details: method=${request.method}, url=${request.url}, directTrigger=${isDirectTrigger}, slackEvent=${isSlackEvent}, jobId=${jobId || requestBody?.jobId || 'none'}`);
     
+    // Special handling for direct job processing from diagnostic
+    const isDirectJob = requestBody?.type === 'direct_job';
+    if (isDirectJob && requestBody?.job) {
+      console.log('[WORKER] Direct job request detected from diagnostic');
+      try {
+        const jobBody = requestBody.job;
+        console.log(`[WORKER] Processing direct job: ${JSON.stringify(jobBody).substring(0, 100)}...`);
+        
+        // Create a job ID for logging
+        const directJobId = `${jobBody.userId}-${jobBody.eventTs?.substring(0, 8) || 'diagnostic'}`;
+        console.log(`[WORKER:${directJobId}] Starting to process direct job`);
+        
+        // Process the job directly
+        const success = await processJob(jobBody);
+        console.log(`[WORKER:${directJobId}] Direct job processing ${success ? 'succeeded' : 'failed'}`);
+        
+        return NextResponse.json({
+          status: success ? 'success' : 'error',
+          action: 'direct_job_processing',
+          jobId: directJobId
+        });
+      } catch (directJobError) {
+        console.error('[WORKER] Error processing direct job:', directJobError);
+        return NextResponse.json({
+          status: 'error',
+          error: directJobError instanceof Error ? directJobError.message : String(directJobError)
+        }, { status: 500 });
+      }
+    }
+    
     const expectedKey = process.env.WORKER_SECRET_KEY || '';
     
     // Log auth details (but protect the full key)
@@ -275,6 +305,54 @@ async function handleWorkerRequest(request: Request) {
     try {
       message = await slackMessageQueue.receiveMessage<SlackMessageJob>();
       console.log('[WORKER] receiveMessage completed, result:', message ? 'Message received' : 'No message found');
+      
+      if (!message) {
+        // Try direct Redis approach as fallback
+        console.log('[WORKER] Attempting direct Redis queue access as fallback');
+        try {
+          const queueKey = 'queue:slack-message-queue:waiting';
+          // Create a new direct Redis connection
+          const directRedis = new Redis({
+            url: process.env.UPSTASH_REDIS_URL || '',
+            token: process.env.UPSTASH_REDIS_TOKEN || '',
+          });
+          
+          // Get the first item without removing it
+          const items = await directRedis.lrange(queueKey, 0, 0);
+          
+          if (items.length > 0) {
+            console.log('[WORKER] Found item in queue via direct Redis access');
+            try {
+              // Try to parse the item
+              const parsedItem = JSON.parse(items[0]);
+              console.log('[WORKER] Parsed item structure:', Object.keys(parsedItem));
+              
+              // If it has the expected format, process it
+              if (parsedItem.body && typeof parsedItem.body === 'object') {
+                console.log('[WORKER] Item has body property, attempting to process');
+                
+                // Create a synthetic message object
+                message = {
+                  streamId: parsedItem.streamId || `manual-${Date.now()}`,
+                  body: parsedItem.body
+                };
+                
+                // Remove the item from the queue
+                console.log('[WORKER] Manually removing item from queue');
+                await directRedis.lrem(queueKey, 1, items[0]);
+                
+                console.log('[WORKER] Successfully retrieved message via fallback method');
+              } else {
+                console.log('[WORKER] Item does not have expected format:', parsedItem);
+              }
+            } catch (parseError) {
+              console.error('[WORKER] Error parsing queue item:', parseError);
+            }
+          }
+        } catch (directRedisError) {
+          console.error('[WORKER] Error in direct Redis fallback:', directRedisError);
+        }
+      }
       
       if (!message) {
         // If this was a direct trigger from Slack events and no message was found,
