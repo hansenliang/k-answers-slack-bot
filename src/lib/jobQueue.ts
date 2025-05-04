@@ -85,7 +85,7 @@ export async function enqueueSlackMessage(job: SlackMessageJob): Promise<boolean
     // Attempt to send message to queue
     console.log(`[JOB_QUEUE:${jobId}] Calling slackMessageQueue.sendMessage`);
     const result = await slackMessageQueue.sendMessage(job);
-    console.log(`[JOB_QUEUE:${jobId}] Queue.sendMessage result:`, result);
+    console.log(`[JOB_QUEUE:${jobId}] Queue.sendMessage result:`, JSON.stringify(result));
     
     // Verify queue update
     try {
@@ -135,7 +135,9 @@ export async function processNextJob(): Promise<boolean> {
       // Continue with receive attempt despite ping failure
     }
     
+    console.log('[JOB_QUEUE] Calling slackMessageQueue.receiveMessage');
     const message = await slackMessageQueue.receiveMessage<SlackMessageJob>();
+    console.log('[JOB_QUEUE] receiveMessage returned:', message ? `Message with streamId ${message.streamId}` : 'No message');
     
     if (!message) {
       console.log('[JOB_QUEUE] No jobs in queue to process');
@@ -154,6 +156,14 @@ export async function processNextJob(): Promise<boolean> {
       
       return false;
     }
+    
+    // Log message details for diagnostic purposes
+    console.log('[JOB_QUEUE] Received message details:', {
+      streamId: message.streamId,
+      bodyKeys: Object.keys(message.body),
+      bodyType: typeof message.body,
+      methods: Object.getOwnPropertyNames(Object.getPrototypeOf(message))
+    });
     
     const jobId = `${message.body.userId}-${message.body.eventTs.substring(0, 8)}`;
     console.log(`[JOB_QUEUE:${jobId}] Retrieved job from queue: user ${message.body.userId}, channel ${message.body.channelId}`);

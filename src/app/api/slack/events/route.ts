@@ -315,7 +315,9 @@ const handleDirectMessage = async (event: any) => {
 
     const userId = event.user;
     const channelId = event.channel;
-    console.log(`[DIRECT_MSG] Received DM from user ${userId} in channel ${channelId}`);
+    const threadTs = event.thread_ts;
+    const questionText = event.text.trim();
+    console.log(`[DIRECT_MSG] Received DM from user ${userId} in channel ${channelId}, thread_ts: ${threadTs}`);
 
     // Check rate limit
     if (!checkRateLimit(userId)) {
@@ -323,22 +325,9 @@ const handleDirectMessage = async (event: any) => {
       await webClient.chat.postMessage({
         channel: channelId,
         text: "You've hit your rate limit (5 questions/min). Please wait a moment and try again.",
-        thread_ts: event.thread_ts,
+        thread_ts: threadTs,
       });
       console.log(`[DIRECT_MSG] Rate limit notification sent to user ${userId}`);
-      return;
-    }
-
-    const questionText = event.text.trim();
-    console.log(`[DIRECT_MSG] Extracted question text: "${questionText}"`);
-    
-    if (!questionText) {
-      console.log(`[DIRECT_MSG] Empty question from user ${userId}, sending prompt`);
-      await webClient.chat.postMessage({
-        channel: channelId,
-        text: "I didn't receive a question. Please try again with a question.",
-      });
-      console.log(`[DIRECT_MSG] Empty question notification sent to user ${userId}`);
       return;
     }
 
@@ -347,7 +336,7 @@ const handleDirectMessage = async (event: any) => {
     await webClient.chat.postMessage({
       channel: channelId,
       text: "I'm processing your question. I'll be back shortly with an answer.",
-      thread_ts: event.thread_ts,
+      thread_ts: threadTs,
     });
 
     // Enqueue the job for background processing instead of processing inline
@@ -357,7 +346,7 @@ const handleDirectMessage = async (event: any) => {
       channelId,
       userId,
       questionText,
-      threadTs: event.thread_ts,
+      threadTs,
       eventTs: event.event_ts
     };
     
@@ -391,26 +380,59 @@ const handleDirectMessage = async (event: any) => {
         // Now immediately trigger the worker to process this job
         console.log(`[DIRECT_MSG:${jobId}] Triggering worker endpoint`);
         try {
-          const workerUrl = new URL(process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : 'http://localhost:3000');
-          workerUrl.pathname = '/api/slack/rag-worker';
+          // Get the deployment URL more reliably
+          const baseUrl = process.env.VERCEL_URL ? 
+            `https://${process.env.VERCEL_URL}` : 
+            (process.env.DEPLOYMENT_URL || 'https://k-answers-bot.vercel.app');
           
+          const workerUrl = `${baseUrl}/api/slack/rag-worker`;
           const workerSecretKey = process.env.WORKER_SECRET_KEY || '';
           
-          // Fire and forget - don't await the result
-          fetch(`${workerUrl.origin}/api/slack/rag-worker?key=${workerSecretKey}`, {
+          console.log(`[DIRECT_MSG:${jobId}] Worker URL: ${workerUrl}`);
+          
+          // Create a more detailed payload with job information
+          const workerPayload = {
+            type: 'direct_trigger',
+            jobId,
+            source: 'slack_events',
+            timestamp: Date.now(),
+            messageInfo: {
+              channelId, 
+              userId,
+              questionText,
+              threadTs: event.thread_ts,
+              eventTs: event.event_ts
+            }
+          };
+          
+          // Send a POST request to trigger the worker
+          // Don't await this to avoid blocking the response to Slack
+          fetch(workerUrl + `?key=${workerSecretKey}`, {
             method: 'POST',
             headers: {
               'Content-Type': 'application/json',
-              'Authorization': `Bearer ${workerSecretKey}`
+              'X-Trigger-Source': 'slack_events',
+              'X-Job-ID': jobId
             },
-            body: JSON.stringify({ type: 'direct_trigger', jobId })
+            body: JSON.stringify(workerPayload)
+          }).then(response => {
+            if (!response.ok) {
+              console.error(`[DIRECT_MSG:${jobId}] Worker trigger response not OK: ${response.status}`);
+              return response.text().then(text => {
+                console.error(`[DIRECT_MSG:${jobId}] Worker error response: ${text}`);
+              });
+            } else {
+              return response.json().then(data => {
+                console.log(`[DIRECT_MSG:${jobId}] Worker trigger successful:`, data);
+              });
+            }
           }).catch(error => {
-            console.error(`[DIRECT_MSG:${jobId}] Failed to trigger worker:`, error);
+            console.error(`[DIRECT_MSG:${jobId}] Error triggering worker:`, error);
           });
           
           console.log(`[DIRECT_MSG:${jobId}] Worker trigger request sent`);
-        } catch (workerError) {
-          console.error(`[DIRECT_MSG:${jobId}] Error triggering worker:`, workerError);
+        } catch (error) {
+          console.error(`[DIRECT_MSG:${jobId}] Failed to trigger worker:`, error);
         }
       } else {
         console.error(`[DIRECT_MSG:${jobId}] Failed to enqueue job for ${userId}`);
@@ -422,7 +444,7 @@ const handleDirectMessage = async (event: any) => {
         await webClient.chat.postMessage({
           channel: channelId,
           text: "I encountered an error while processing your request. Please try again later.",
-          thread_ts: event.thread_ts,
+          thread_ts: threadTs,
         });
       }
     } catch (enqueueError) {
@@ -439,7 +461,7 @@ const handleDirectMessage = async (event: any) => {
         await webClient.chat.postMessage({
           channel: channelId,
           text: "I encountered an error while processing your request. Please try again later.",
-          thread_ts: event.thread_ts,
+          thread_ts: threadTs,
         });
       } catch (postError) {
         console.error(`[DIRECT_MSG:${jobId}] Failed to send error message:`, postError);

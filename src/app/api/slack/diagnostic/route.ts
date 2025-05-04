@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
 import { WebClient } from '@slack/web-api';
 import { Redis } from '@upstash/redis';
-import { slackMessageQueue } from '@/lib/jobQueue';
+import { slackMessageQueue, enqueueSlackMessage } from '@/lib/jobQueue';
 
 // Set runtime to nodejs to support Node.js built-in modules
 export const runtime = 'nodejs';
