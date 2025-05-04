@@ -363,11 +363,27 @@ async function handleRagProcessing(questionText: string, channelId: string, mess
   try {
     console.log(`[RAG_PROCESS:${processingId}] Starting RAG processing for question: "${questionText.substring(0, 30)}..."`);
     
+    // Set a timeout to ensure processing doesn't hang indefinitely
+    const timeoutMs = 25000; // 25 seconds max
+    let timeoutId: NodeJS.Timeout | undefined;
+    
+    const timeoutPromise = new Promise<string>((_, reject) => {
+      timeoutId = setTimeout(() => {
+        reject(new Error('RAG processing timed out after 25 seconds'));
+      }, timeoutMs);
+    });
+    
     // Get the answer from RAG
     const startTime = Date.now();
-    const answer = await queryRag(questionText);
-    const processingTime = Date.now() - startTime;
+    const answerPromise = queryRag(questionText);
     
+    // Race between the answer and the timeout
+    const answer = await Promise.race([answerPromise, timeoutPromise]);
+    
+    // Clear timeout if it hasn't fired
+    if (timeoutId) clearTimeout(timeoutId);
+    
+    const processingTime = Date.now() - startTime;
     console.log(`[RAG_PROCESS:${processingId}] RAG processing completed in ${processingTime}ms`);
     
     // Update the original "Thinking..." message with the answer

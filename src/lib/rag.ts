@@ -39,7 +39,7 @@ export async function queryRag(text: string): Promise<string> {
     console.log(`[RAG_QUERY] Processing input text: "${text}"`);
     
     // Use a 45-second timeout for the entire RAG process
-    return await withTimeout(performRagQuery(text), 45000, 'RAG query timed out after 45 seconds');
+    return await withTimeout(performRagQuery(text), 30000, 'RAG query timed out after 30 seconds');
   } catch (error) {
     console.error('[RAG_QUERY] Failed to process RAG query:', error);
     console.log(`[RAG_QUERY] Error occurred after ${Date.now() - startTime}ms`);
@@ -170,7 +170,7 @@ export async function streamRag(text: string, onChunk: (chunk: string) => Promis
     
     try {
       const stream = await openai.chat.completions.create({
-        model: 'gpt-4o-mini',
+        model: 'gpt-3.5-turbo',
         messages: [
           { role: 'system', content: systemPrompt },
           { role: 'user', content: text }
@@ -327,7 +327,7 @@ async function performRagQuery(text: string): Promise<string> {
   let completion;
   try {
     completion = await openai.chat.completions.create({
-      model: 'gpt-4o-mini',
+      model: 'gpt-3.5-turbo',
       messages: [
         { role: 'system', content: systemPrompt },
         { role: 'user', content: text }
