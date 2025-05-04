@@ -542,6 +542,26 @@ export async function POST(request: Request) {
           );
         }
         
+        // IMPORTANT: We still need to trigger the worker to process the message immediately
+        // The message format is correct now, but we need to ensure the worker runs
+        console.log('[SLACK_POST] Triggering worker to process enqueued message');
+        const workerUrl = new URL(request.url);
+        workerUrl.pathname = '/api/slack/rag-worker';
+        
+        // Ensure the worker secret key is properly included
+        const workerSecretKey = process.env.WORKER_SECRET_KEY || '';
+        
+        // Trigger the worker without waiting for it to complete
+        fetch(`${workerUrl.origin}/api/slack/rag-worker?key=${workerSecretKey}`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${workerSecretKey}`
+          }
+        }).catch(error => {
+          console.error('[SLACK_POST] Failed to trigger worker:', error);
+        });
+        
         // DON'T trigger the worker with raw Slack event - the handler functions 
         // will properly enqueue the message and trigger the worker in the right format
         
