@@ -1,8 +1,8 @@
 import { NextResponse } from 'next/server';
 import { WebClient } from '@slack/web-api';
 import { Redis } from '@upstash/redis';
-import { slackMessageQueue, enqueueSlackMessage, SlackMessageJob } from '@/lib/jobQueue';
-import { queryRag } from '@/lib/rag';
+import { slackMessageQueue, enqueueSlackMessage, SlackMessageJob, monitorQueueHealth, processNextJob } from '@/lib/jobQueue';
+import { queryRag, safeQueryRag } from '@/lib/rag';
 import { SLACK_BOT_TOKEN, validateSlackEnvironment, logEnvironmentStatus } from '@/lib/env';
 
 // Set runtime to nodejs to support Node.js built-in modules
@@ -276,67 +276,179 @@ interface DiagnosticResult {
   timestamp: string;
 }
 
-// Diagnostic endpoint for testing Slack integration
-export async function GET(): Promise<NextResponse<DiagnosticResult>> {
-  console.log('[SLACK_DIAGNOSTIC] Running Slack API diagnostic');
+// Test the Redis connection directly
+async function testRedisConnection() {
+  const redisUrl = process.env.UPSTASH_REDIS_URL || '';
+  const redisToken = process.env.UPSTASH_REDIS_TOKEN || '';
   
-  // Log full environment status
-  logEnvironmentStatus();
+  console.log(`[DIAGNOSTIC] Testing Redis connection to ${redisUrl.substring(0, 12)}...`);
   
-  // Check Slack environment variables
-  const slackEnv = validateSlackEnvironment();
+  // First test with the valid URL format check
+  const fixedUrl = redisUrl.startsWith('https://') ? redisUrl : `https://${redisUrl.replace(/^[\/]*/, '')}`;
   
-  // Initialize diagnostic results
-  const diagnosticResults: DiagnosticResult = {
-    environment: {
-      status: slackEnv.valid ? 'valid' : 'invalid',
-      missing: slackEnv.missing
-    },
-    botConnection: {
-      status: 'unknown',
-      teamName: '',
-      botId: '',
-      error: null
-    },
-    timestamp: new Date().toISOString()
-  };
-  
-  // If environment is invalid, return early
-  if (!slackEnv.valid) {
-    console.error(`[SLACK_DIAGNOSTIC] Invalid environment: missing ${slackEnv.missing.join(', ')}`);
-    return NextResponse.json(diagnosticResults, { status: 500 });
-  }
-  
-  // Test connection to Slack API
   try {
-    console.log('[SLACK_DIAGNOSTIC] Testing Slack API connection');
-    const webClient = new WebClient(SLACK_BOT_TOKEN);
+    const redis = new Redis({
+      url: fixedUrl,
+      token: redisToken,
+    });
     
-    // Get bot and team info
-    const authTest = await webClient.auth.test();
-    console.log('[SLACK_DIAGNOSTIC] Slack API connection successful', authTest);
+    const pingResult = await redis.ping();
+    console.log(`[DIAGNOSTIC] Redis ping successful: ${pingResult}`);
     
-    // Update results
-    diagnosticResults.botConnection = {
+    // Test writing and reading a value
+    const testKey = `diagnostic:${Date.now()}`;
+    await redis.set(testKey, 'test-value');
+    const testValue = await redis.get(testKey);
+    console.log(`[DIAGNOSTIC] Redis set/get test: ${testValue === 'test-value' ? 'success' : 'failure'}`);
+    
+    // Clean up
+    await redis.del(testKey);
+    
+    return {
       status: 'connected',
-      teamName: authTest.team as string,
-      botId: authTest.user_id as string,
-      error: null
+      url: fixedUrl.substring(0, 12) + '...',
+      pingResult
     };
-    
-    return NextResponse.json(diagnosticResults);
   } catch (error) {
-    console.error('[SLACK_DIAGNOSTIC] Slack API connection failed:', error);
-    
-    // Update results with error
-    diagnosticResults.botConnection = {
+    console.error('[DIAGNOSTIC] Redis connection test failed:', error);
+    return {
       status: 'error',
-      teamName: '',
-      botId: '',
-      error: error instanceof Error ? error.message : 'Unknown error'
+      url: fixedUrl.substring(0, 12) + '...',
+      error: error instanceof Error ? error.message : String(error)
     };
+  }
+}
+
+// Test queue operations
+async function testQueueOperations() {
+  try {
+    // Test enqueue operation with a diagnostic message
+    const enqueueResult = await enqueueSlackMessage({
+      channelId: 'diagnostic',
+      userId: 'diagnostic',
+      questionText: 'diagnostic test message',
+      eventTs: Date.now().toString(),
+      useStreaming: false
+    });
     
-    return NextResponse.json(diagnosticResults, { status: 500 });
+    // Check queue health
+    const healthResult = await monitorQueueHealth();
+    
+    // Try to process a job from the queue
+    const processResult = await processNextJob();
+    
+    return {
+      enqueueSuccess: enqueueResult,
+      queueHealth: healthResult,
+      processResult
+    };
+  } catch (error) {
+    console.error('[DIAGNOSTIC] Queue operations test failed:', error);
+    return {
+      status: 'error',
+      error: error instanceof Error ? error.message : String(error)
+    };
+  }
+}
+
+// Test RAG functionality
+async function testRagSystem() {
+  try {
+    // Simple test query
+    const result = await safeQueryRag('What is the purpose of this tool?', 1);
+    
+    return {
+      status: 'success',
+      response: result.substring(0, 100) + '...' // Truncate for brevity
+    };
+  } catch (error) {
+    console.error('[DIAGNOSTIC] RAG test failed:', error);
+    return {
+      status: 'error',
+      error: error instanceof Error ? error.message : String(error)
+    };
+  }
+}
+
+// Test worker triggering
+async function testWorkerTrigger() {
+  try {
+    const baseUrl = process.env.VERCEL_ENV === 'production' 
+      ? 'https://k-answers-bot.vercel.app' 
+      : process.env.VERCEL_URL 
+        ? `https://${process.env.VERCEL_URL}` 
+        : 'http://localhost:3000';
+    
+    const workerSecret = process.env.WORKER_SECRET_KEY || '';
+    
+    console.log(`[DIAGNOSTIC] Triggering worker at ${baseUrl}/api/slack/rag-worker`);
+    
+    const response = await fetch(`${baseUrl}/api/slack/rag-worker?key=${workerSecret}`, { 
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Trigger-Source': 'diagnostic'
+      },
+      body: JSON.stringify({ type: 'diagnostic' })
+    });
+    
+    const responseData = await response.text();
+    
+    return {
+      status: response.ok ? 'success' : 'error',
+      statusCode: response.status,
+      response: responseData
+    };
+  } catch (error) {
+    console.error('[DIAGNOSTIC] Worker trigger test failed:', error);
+    return {
+      status: 'error',
+      error: error instanceof Error ? error.message : String(error)
+    };
+  }
+}
+
+// Endpoint to get environment configuration (safely)
+async function getEnvironmentInfo() {
+  return {
+    redisConfigured: !!(process.env.UPSTASH_REDIS_URL && process.env.UPSTASH_REDIS_TOKEN),
+    slackConfigured: !!(process.env.SLACK_BOT_TOKEN && process.env.SLACK_SIGNING_SECRET),
+    openaiConfigured: !!process.env.OPENAI_API_KEY,
+    pineconeConfigured: !!process.env.PINECONE_API_KEY,
+    workerKeyConfigured: !!process.env.WORKER_SECRET_KEY,
+    vercelEnv: process.env.VERCEL_ENV || 'unknown',
+    nodeEnv: process.env.NODE_ENV || 'unknown'
+  };
+}
+
+// Main handler
+export async function GET(request: Request) {
+  console.log('[DIAGNOSTIC] Starting system diagnostic check');
+  
+  try {
+    // Run all diagnostic checks in parallel
+    const [redisResult, queueResult, ragResult, workerResult, envInfo] = await Promise.all([
+      testRedisConnection(),
+      testQueueOperations(),
+      testRagSystem(),
+      testWorkerTrigger(),
+      getEnvironmentInfo()
+    ]);
+    
+    return NextResponse.json({
+      timestamp: new Date().toISOString(),
+      redis: redisResult,
+      queue: queueResult,
+      rag: ragResult,
+      worker: workerResult,
+      environment: envInfo
+    });
+  } catch (error) {
+    console.error('[DIAGNOSTIC] Error during diagnostic:', error);
+    return NextResponse.json({ 
+      status: 'error',
+      error: error instanceof Error ? error.message : String(error)
+    }, { status: 500 });
   }
 }
 

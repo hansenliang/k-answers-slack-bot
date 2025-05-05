@@ -45,21 +45,53 @@ const redisToken = process.env.UPSTASH_REDIS_TOKEN || '';
 console.log(`[REDIS_INIT] URL format valid: ${redisUrl.startsWith('https://')}`);
 console.log(`[REDIS_INIT] Token available: ${!!redisToken}`);
 
-// Initialize the Redis client
-const redis = new Redis({
-  url: redisUrl,
-  token: redisToken,
-});
+// Create Redis factory function for on-demand clients to avoid stale connections
+function createRedisClient(): Redis {
+  return new Redis({
+    url: redisUrl,
+    token: redisToken,
+    automaticDeserialization: false, // Disable automatic deserialization to avoid type conflicts
+  });
+}
 
-// Initialize the Upstash Queue
-// @ts-ignore - Ignoring the type mismatch between Redis instances
+// Initialize the Redis client
+const redis = createRedisClient();
+
+// Initialize the Upstash Queue with more robust error handling
+// @ts-ignore - Ignoring the type mismatch between Redis instances - this is a known issue with Upstash libraries
 export const slackMessageQueue = new Queue({
   redis,
   queueName: 'slack-message-queue',
   concurrencyLimit: 5,
+  deduplicationEnabled: true, // Prevent duplicate messages
+  deduplicationTtl: 300, // 5 minutes deduplication window
 });
 
-// Function to enqueue a Slack message job
+// Function to directly add a message to the Redis queue
+// This bypasses the Queue library as a fallback mechanism
+async function directlyEnqueueMessage(job: SlackMessageJob): Promise<boolean> {
+  const jobId = `${job.userId}-${job.eventTs.substring(0, 8)}`;
+  console.log(`[JOB_QUEUE:${jobId}] Using direct Redis enqueuing as fallback`);
+  
+  try {
+    // Create a fresh Redis client for this operation
+    const directRedis = createRedisClient();
+    
+    // Push directly to the waiting queue
+    const pushResult = await directRedis.rpush(
+      'queue:slack-message-queue:waiting',
+      JSON.stringify(job)
+    );
+    
+    console.log(`[JOB_QUEUE:${jobId}] Direct push result: ${pushResult}`);
+    return pushResult > 0;
+  } catch (error) {
+    console.error(`[JOB_QUEUE:${jobId}] Direct enqueuing failed:`, error);
+    return false;
+  }
+}
+
+// Function to enqueue a Slack message job with enhanced reliability
 export async function enqueueSlackMessage(job: SlackMessageJob): Promise<boolean> {
   const jobId = `${job.userId}-${job.eventTs.substring(0, 8)}`;
   console.log(`[JOB_QUEUE:${jobId}] Enqueueing message from user ${job.userId} with text "${job.questionText.substring(0, 30)}..."`);
@@ -67,11 +99,16 @@ export async function enqueueSlackMessage(job: SlackMessageJob): Promise<boolean
   // Validate and fix timestamp formats
   job = validateSlackTimestamps(job);
   
+  // Try the main Queue library approach first
+  let enqueueSuccess = false;
+  
   try {
     // First verify Redis connection
     try {
       console.log(`[JOB_QUEUE:${jobId}] Testing Redis connection before enqueueing`);
-      await redis.ping();
+      // Use a fresh Redis client for the ping test
+      const testRedis = createRedisClient();
+      await testRedis.ping();
       console.log(`[JOB_QUEUE:${jobId}] Redis connection test successful`);
     } catch (pingError) {
       console.error(`[JOB_QUEUE:${jobId}] Redis ping failed before enqueueing:`, pingError);
@@ -81,31 +118,73 @@ export async function enqueueSlackMessage(job: SlackMessageJob): Promise<boolean
     // Get queue info before enqueue
     let initialQueueSize;
     try {
-      initialQueueSize = await redis.llen('queue:slack-message-queue:waiting');
+      // Use a fresh Redis client for getting the length
+      const checkRedis = createRedisClient();
+      initialQueueSize = await checkRedis.llen('queue:slack-message-queue:waiting');
       console.log(`[JOB_QUEUE:${jobId}] Initial queue size: ${initialQueueSize}`);
     } catch (lenError) {
       console.error(`[JOB_QUEUE:${jobId}] Failed to get initial queue length:`, lenError);
     }
     
-    // IMPORTANT: Always use the Queue library to ensure proper message format
+    // IMPORTANT: Use the Queue library first for proper message formatting
     console.log(`[JOB_QUEUE:${jobId}] Calling slackMessageQueue.sendMessage with properly formatted job`);
-    const result = await slackMessageQueue.sendMessage(job);
-    console.log(`[JOB_QUEUE:${jobId}] Queue.sendMessage result: ${result}`);
+    try {
+      const result = await slackMessageQueue.sendMessage(job);
+      console.log(`[JOB_QUEUE:${jobId}] Queue.sendMessage result: ${result}`);
+      
+      if (result) {
+        enqueueSuccess = true;
+      }
+    } catch (queueError) {
+      console.error(`[JOB_QUEUE:${jobId}] Queue.sendMessage failed:`, queueError);
+      // Continue to fallback
+    }
+    
+    // If Queue library fails, try direct Redis approach
+    if (!enqueueSuccess) {
+      console.log(`[JOB_QUEUE:${jobId}] Attempting direct Redis enqueuing as fallback`);
+      enqueueSuccess = await directlyEnqueueMessage(job);
+    }
     
     // Verify queue update
     try {
-      const newQueueSize = await redis.llen('queue:slack-message-queue:waiting');
+      // Use a fresh Redis client for checking the queue again
+      const verifyRedis = createRedisClient();
+      const newQueueSize = await verifyRedis.llen('queue:slack-message-queue:waiting');
       console.log(`[JOB_QUEUE:${jobId}] New queue size after enqueue: ${newQueueSize}`);
       
       if (initialQueueSize !== undefined && newQueueSize <= initialQueueSize) {
         console.warn(`[JOB_QUEUE:${jobId}] Queue size did not increase as expected. Before: ${initialQueueSize}, After: ${newQueueSize}`);
+        
+        // If verification failed but we thought we succeeded, try direct method again
+        if (enqueueSuccess && newQueueSize <= initialQueueSize) {
+          console.log(`[JOB_QUEUE:${jobId}] Queue verification failed, trying direct method again`);
+          enqueueSuccess = await directlyEnqueueMessage(job);
+          
+          // Verify one more time
+          const finalSize = await verifyRedis.llen('queue:slack-message-queue:waiting');
+          if (finalSize > newQueueSize) {
+            console.log(`[JOB_QUEUE:${jobId}] Final direct enqueue succeeded, queue size now: ${finalSize}`);
+            enqueueSuccess = true;
+          }
+        }
+      } else {
+        // Queue size increased, which confirms success
+        enqueueSuccess = true;
       }
     } catch (verifyError) {
       console.error(`[JOB_QUEUE:${jobId}] Failed to verify queue update:`, verifyError);
+      // If we already have a success indicator, keep it
     }
     
-    console.log(`[JOB_QUEUE:${jobId}] Successfully enqueued message for processing`);
-    return true;
+    // Final log message
+    if (enqueueSuccess) {
+      console.log(`[JOB_QUEUE:${jobId}] Successfully enqueued message for processing`);
+    } else {
+      console.error(`[JOB_QUEUE:${jobId}] Failed to enqueue message after all attempts`);
+    }
+    
+    return enqueueSuccess;
   } catch (error) {
     console.error(`[JOB_QUEUE:${jobId}] Failed to enqueue message:`, error);
     
@@ -122,7 +201,14 @@ export async function enqueueSlackMessage(job: SlackMessageJob): Promise<boolean
     }
     
     console.error(`[JOB_QUEUE:${jobId}] Redis config - URL starts with ${redisUrl.substring(0, 8)}, token length: ${redisToken.length}`);
-    return false;
+    
+    // Try direct method as a last resort
+    try {
+      return await directlyEnqueueMessage(job);
+    } catch (directError) {
+      console.error(`[JOB_QUEUE:${jobId}] Direct enqueuing also failed:`, directError);
+      return false;
+    }
   }
 }
 
@@ -188,25 +274,23 @@ export async function monitorQueueHealth(): Promise<{status: string, queueSize: 
   console.log('[QUEUE_MONITOR] Checking queue health');
   
   try {
-    // First test Redis connection
-    const redis = new Redis({
-      url: redisUrl,
-      token: redisToken,
-    });
+    // Create a fresh Redis client
+    const monitorRedis = createRedisClient();
     
-    await redis.ping();
-    console.log('[QUEUE_MONITOR] Redis connection OK');
+    // Test Redis connection
+    const pingResult = await monitorRedis.ping();
+    console.log(`[QUEUE_MONITOR] Redis connection OK (${pingResult})`);
     
     // Check waiting queue size
-    const waitingQueueSize = await redis.llen('queue:slack-message-queue:waiting');
+    const waitingQueueSize = await monitorRedis.llen('queue:slack-message-queue:waiting');
     console.log(`[QUEUE_MONITOR] Waiting queue size: ${waitingQueueSize}`);
     
     // Check processing queue size (jobs that are being worked on)
-    const processingQueueSize = await redis.llen('queue:slack-message-queue:processing');
+    const processingQueueSize = await monitorRedis.llen('queue:slack-message-queue:processing');
     console.log(`[QUEUE_MONITOR] Processing queue size: ${processingQueueSize}`);
     
     // Check dead letter queue for failed jobs
-    const deadQueueSize = await redis.llen('queue:slack-message-queue:dead');
+    const deadQueueSize = await monitorRedis.llen('queue:slack-message-queue:dead');
     console.log(`[QUEUE_MONITOR] Dead letter queue size: ${deadQueueSize}`);
     
     // If processing queue is very large, there might be stuck jobs
@@ -238,14 +322,106 @@ export async function monitorQueueHealth(): Promise<{status: string, queueSize: 
   }
 }
 
+// Function to execute a Redis operation with retries
+async function withRedisRetry<T>(
+  operation: (client: Redis) => Promise<T>, 
+  maxRetries: number = 3, 
+  label: string = "Redis operation"
+): Promise<T> {
+  let lastError: any;
+  let retryCount = 0;
+  
+  while (retryCount <= maxRetries) {
+    try {
+      // Create a fresh Redis client for each attempt
+      const client = createRedisClient();
+      const result = await operation(client);
+      
+      // If we had retries, log that we succeeded after retrying
+      if (retryCount > 0) {
+        console.log(`[REDIS_RETRY] ${label} succeeded after ${retryCount} retries`);
+      }
+      
+      return result;
+    } catch (error) {
+      lastError = error;
+      retryCount++;
+      
+      if (retryCount > maxRetries) {
+        console.error(`[REDIS_RETRY] ${label} failed after ${maxRetries} retries:`, error);
+        break;
+      }
+      
+      // Implement exponential backoff
+      const delay = Math.min(100 * Math.pow(2, retryCount), 2000); // Max 2 seconds
+      console.warn(`[REDIS_RETRY] ${label} failed, retrying in ${delay}ms (attempt ${retryCount}/${maxRetries}):`, error);
+      await new Promise(resolve => setTimeout(resolve, delay));
+    }
+  }
+  
+  throw lastError;
+}
+
+// Update getJobFromRedis to use the retry mechanism
+export async function getJobFromRedis(): Promise<{job: SlackMessageJob, index: number} | null> {
+  try {
+    return await withRedisRetry(async (redis) => {
+      // Get the first waiting job
+      const items = await redis.lrange('queue:slack-message-queue:waiting', 0, 0);
+      
+      if (items.length === 0) {
+        return null;
+      }
+      
+      // Parse the job
+      try {
+        const job = JSON.parse(items[0]);
+        return {
+          job,
+          index: 0
+        };
+      } catch (parseError) {
+        console.error('[JOB_QUEUE] Error parsing job from Redis:', parseError);
+        return null;
+      }
+    }, 3, "getJobFromRedis");
+  } catch (error) {
+    console.error('[JOB_QUEUE] Error getting job from Redis:', error);
+    return null;
+  }
+}
+
+// Function to remove a job from Redis
+export async function removeJobFromRedis(index: number): Promise<boolean> {
+  try {
+    // Create a fresh Redis client
+    const removeRedis = createRedisClient();
+    
+    // Get the job at the specified index
+    const items = await removeRedis.lrange('queue:slack-message-queue:waiting', index, index);
+    
+    if (items.length === 0) {
+      return false;
+    }
+    
+    // Remove the job
+    const removeCount = await removeRedis.lrem('queue:slack-message-queue:waiting', 1, items[0]);
+    return removeCount > 0;
+  } catch (error) {
+    console.error('[JOB_QUEUE] Error removing job from Redis:', error);
+    return false;
+  }
+}
+
 // Function to process a message job from the queue
 export async function processNextJob(): Promise<boolean> {
   console.log('[JOB_QUEUE] Attempting to process next job in queue');
   
   try {
-    // First test Redis connection
+    // First test Redis connection with a fresh client
     try {
-      await redis.ping();
+      const pingRedis = createRedisClient();
+      await pingRedis.ping();
       console.log('[JOB_QUEUE] Redis connection OK before receiving message');
     } catch (pingError) {
       console.error('[JOB_QUEUE] Redis ping failed before receiving message:', pingError);
@@ -253,15 +429,44 @@ export async function processNextJob(): Promise<boolean> {
     }
     
     console.log('[JOB_QUEUE] Calling slackMessageQueue.receiveMessage');
-    const message = await slackMessageQueue.receiveMessage<SlackMessageJob>();
-    console.log('[JOB_QUEUE] receiveMessage returned:', message ? `Message with streamId ${message.streamId}` : 'No message');
+    
+    // Try to get a message from the queue using the library first
+    let message;
+    try {
+      message = await slackMessageQueue.receiveMessage<SlackMessageJob>();
+      console.log('[JOB_QUEUE] receiveMessage returned:', message ? `Message with streamId ${message.streamId}` : 'No message');
+    } catch (receiveError) {
+      console.error('[JOB_QUEUE] Error receiving message from queue:', receiveError);
+      message = null;
+    }
+    
+    // If no message from the library, try direct Redis access
+    if (!message) {
+      console.log('[JOB_QUEUE] Attempting direct Redis access to get a job');
+      
+      const directJob = await getJobFromRedis();
+      if (directJob) {
+        console.log('[JOB_QUEUE] Got job directly from Redis:', directJob.job.userId);
+        
+        // Create a synthetic message object to match the expected format
+        message = {
+          streamId: `direct-${Date.now()}`,
+          body: directJob.job
+        };
+        
+        // Remove the job from Redis since we're processing it
+        const removed = await removeJobFromRedis(directJob.index);
+        console.log(`[JOB_QUEUE] Removed job from Redis: ${removed}`);
+      }
+    }
     
     if (!message) {
       console.log('[JOB_QUEUE] No jobs in queue to process');
       
       // Double-check with direct Redis access
       try {
-        const queueLength = await redis.llen('queue:slack-message-queue:waiting');
+        const checkRedis = createRedisClient();
+        const queueLength = await checkRedis.llen('queue:slack-message-queue:waiting');
         console.log(`[JOB_QUEUE] Direct Redis queue check: ${queueLength} items`);
         
         if (queueLength > 0) {

@@ -225,43 +225,85 @@ async function processSlackMessage(event: any, isAppMention = false, requestUrl?
         
         console.log(`[PROCESS:${processingId}] Triggering worker at ${baseUrl}/api/slack/rag-worker`);
         
-        // Don't await the fetch - fire and forget
-        fetch(`${baseUrl}/api/slack/rag-worker?key=${workerSecret}`, { 
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'X-Trigger-Source': 'slack_events'
-          }
-        })
-        .then(response => {
-          if (!response.ok) {
-            console.error(`[PROCESS:${processingId}] Worker trigger failed with status ${response.status}`);
-            return response.text().then(text => {
-              console.error(`[PROCESS:${processingId}] Worker error response: ${text}`);
+        // Implement multiple trigger attempts with exponential backoff
+        const triggerWorker = async (attempt = 1, maxAttempts = 3, delayMs = 1000) => {
+          try {
+            const response = await fetch(`${baseUrl}/api/slack/rag-worker?key=${workerSecret}`, { 
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                'X-Trigger-Source': 'slack_events',
+                'X-Job-ID': processingId
+              },
+              // Include essential information to help debugging
+              body: JSON.stringify({
+                type: 'worker_trigger',
+                triggerSource: 'slack_events',
+                timestamp: Date.now(),
+                attempt
+              })
             });
-          } else {
-            console.log(`[PROCESS:${processingId}] Worker successfully triggered with status ${response.status}`);
-            enqueueSuccess = true;
+            
+            if (!response.ok) {
+              console.error(`[PROCESS:${processingId}] Worker trigger failed with status ${response.status} (attempt ${attempt}/${maxAttempts})`);
+              const responseText = await response.text();
+              console.error(`[PROCESS:${processingId}] Worker error response: ${responseText}`);
+              
+              // Retry with exponential backoff if we haven't reached max attempts
+              if (attempt < maxAttempts) {
+                const nextDelay = delayMs * 2; // Exponential backoff
+                console.log(`[PROCESS:${processingId}] Retrying worker trigger in ${nextDelay}ms (attempt ${attempt+1}/${maxAttempts})`);
+                setTimeout(() => triggerWorker(attempt + 1, maxAttempts, nextDelay), nextDelay);
+              } else {
+                console.error(`[PROCESS:${processingId}] Failed to trigger worker after ${maxAttempts} attempts`);
+              }
+            } else {
+              console.log(`[PROCESS:${processingId}] Worker successfully triggered with status ${response.status}`);
+              // Parse response to get more information
+              try {
+                const responseData = await response.json();
+                console.log(`[PROCESS:${processingId}] Worker response: ${JSON.stringify(responseData)}`);
+                
+                // Mark success only if we get a valid response
+                if (responseData && (responseData.status === 'success' || responseData.status === 'no_jobs')) {
+                  enqueueSuccess = true;
+                }
+              } catch (parseError) {
+                console.warn(`[PROCESS:${processingId}] Could not parse worker response as JSON`);
+                // Still consider it a success if the status was OK
+                enqueueSuccess = true;
+              }
+            }
+          } catch (error) {
+            console.error(`[PROCESS:${processingId}] Error triggering worker (attempt ${attempt}/${maxAttempts}):`, error);
+            
+            // Retry with exponential backoff if we haven't reached max attempts
+            if (attempt < maxAttempts) {
+              const nextDelay = delayMs * 2; // Exponential backoff
+              console.log(`[PROCESS:${processingId}] Retrying worker trigger in ${nextDelay}ms (attempt ${attempt+1}/${maxAttempts})`);
+              setTimeout(() => triggerWorker(attempt + 1, maxAttempts, nextDelay), nextDelay);
+            }
           }
-        })
-        .catch(error => {
-          console.error(`[PROCESS:${processingId}] Error triggering worker:`, error);
-        });
+        };
+        
+        // Start the trigger process (don't await to avoid blocking)
+        triggerWorker();
+        
       } catch (triggerError) {
-        console.error(`[PROCESS:${processingId}] Error triggering worker (non-blocking):`, triggerError);
+        console.error(`[PROCESS:${processingId}] Error setting up worker trigger:`, triggerError);
       }
       
-      // Check if the redis queue is actually increasing (as a secondary check)
+      // Send an immediate acknowledgement message to the user
       try {
-        const queueLen = await redis.llen('queue:slack-message-queue:waiting');
-        if (queueLen > 0) {
-          console.log(`[PROCESS:${processingId}] Verified queue size is now ${queueLen}`);
-          enqueueSuccess = true;
-        } else {
-          console.warn(`[PROCESS:${processingId}] Queue appears empty after enqueue, may need to process directly`);
-        }
-      } catch (redisError) {
-        console.error(`[PROCESS:${processingId}] Error checking Redis queue:`, redisError);
+        await webClient.chat.postMessage({
+          channel: channelId,
+          thread_ts: threadTs,
+          text: "I've received your question and I'm working on it. I'll respond soon."
+        });
+        console.log(`[PROCESS:${processingId}] Sent acknowledgment message to user`);
+      } catch (ackError) {
+        console.error(`[PROCESS:${processingId}] Failed to send acknowledgment:`, ackError);
+        // Continue processing even if acknowledgment fails
       }
     } catch (enqueueError) {
       console.error(`[PROCESS:${processingId}] Error enqueueing message:`, enqueueError);
