@@ -358,8 +358,30 @@ async function processJobWithStreaming(job: SlackMessageJob): Promise<boolean> {
         } catch (updateError) {
           console.error(`[WORKER:${jobId}] Error updating message:`, updateError);
           
-          // If we can't update (e.g., rate limited), we'll still continue collecting 
-          // the full response but may skip some updates
+          // Handle rate limiting errors with proper backoff
+          if (updateError && (updateError as any).code === 'slack_webapi_platform_error') {
+            const slackError = updateError as any;
+            if (slackError.data && slackError.data.error === 'ratelimited') {
+              const retryAfter = parseInt(slackError.headers?.['retry-after'] || '1', 10);
+              console.log(`[WORKER:${jobId}] Rate limited by Slack. Backing off for ${retryAfter} seconds`);
+              
+              // Wait for the recommended retry time before continuing
+              await new Promise(resolve => setTimeout(resolve, retryAfter * 1000));
+              
+              // Try again after backoff
+              try {
+                await webClient!.chat.update({
+                  channel: job.channelId,
+                  ts: messageTs,
+                  text: content
+                });
+                console.log(`[WORKER:${jobId}] Successfully updated message after rate limit backoff`);
+              } catch (retryError) {
+                console.error(`[WORKER:${jobId}] Failed to update message after backoff:`, retryError);
+              }
+            }
+          }
+          // If we can't update, we'll still continue collecting the full response
         }
       }
     };
@@ -634,60 +656,21 @@ async function handleWorkerRequest(request: Request) {
           
           console.log(`[WORKER:${jobId}] Message processed and verification result: ${verificationResult}`);
         } catch (verifyError) {
-          console.error(`[WORKER:${jobId}] Error verifying message in queue:`, verifyError);
-          
-          // Log detailed error information
-          if (verifyError instanceof Error) {
-            console.error(`[WORKER:${jobId}] Error type: ${verifyError.name}`);
-            console.error(`[WORKER:${jobId}] Error message: ${verifyError.message}`);
-            console.error(`[WORKER:${jobId}] Error stack: ${verifyError.stack}`);
-          }
-        }
-      } else {
-        console.error(`[WORKER:${jobId}] Failed to process message`);
-        // Don't verify to allow reprocessing
-      }
-      
-      // Check if there are more jobs in the queue
-      const remainingJobs = await hasMoreJobs();
-      console.log(`[WORKER] Remaining jobs in queue: ${remainingJobs}`);
-      
-      // Chain worker execution if there are more jobs
-      if (remainingJobs > 0) {
-        // Call this endpoint again to process the next job
-        console.log('[WORKER] Calling worker again to process next job');
-        
-        try {
-          // Fire and forget - don't await to avoid exceeding timeout
-          fetch(`${url.origin}${url.pathname}?key=${expectedKey}&chain=true`, {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json'
-            }
-          }).catch(chainError => {
-            console.error('[WORKER] Error chaining worker:', chainError instanceof Error ? chainError.message : String(chainError));
-          });
-          
-          console.log('[WORKER] Chained worker call initiated');
-        } catch (chainError) {
-          console.error('[WORKER] Failed to chain worker:', chainError instanceof Error ? chainError.message : String(chainError));
+          console.error(`[WORKER:${jobId}] Error verifying message:`, verifyError);
         }
       }
       
-      return NextResponse.json({ 
+      return NextResponse.json({
         status: success ? 'success' : 'error',
-        remainingJobs,
-        executionTime: Date.now() - startTime
+        action: 'job_processing',
+        jobId: jobId
       });
     } catch (error) {
-      console.error('[WORKER] Error processing message:', error instanceof Error ? error.message : String(error));
-      return NextResponse.json({ error: 'Failed to process message', message: error instanceof Error ? error.message : String(error) }, { status: 500 });
+      console.error(`[WORKER] Error processing message:`, error);
+      return NextResponse.json({ status: 'error', error: error instanceof Error ? error.message : String(error) }, { status: 500 });
     }
   } catch (error) {
-    console.error('[WORKER] Unhandled error in worker:', error instanceof Error ? error.message : String(error));
-    if (error instanceof Error && error.stack) {
-      console.error('[WORKER] Stack trace:', error.stack);
-    }
-    return NextResponse.json({ error: 'Internal worker error', message: error instanceof Error ? error.message : String(error) }, { status: 500 });
+    console.error(`[WORKER] Error processing request:`, error);
+    return NextResponse.json({ status: 'error', error: error instanceof Error ? error.message : String(error) }, { status: 500 });
   }
 }

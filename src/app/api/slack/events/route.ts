@@ -178,6 +178,17 @@ async function processSlackMessage(event: any, isAppMention = false, requestUrl?
       return false;
     }
 
+    // Check if this event has already been processed (deduplication)
+    const eventKey = `event:${event.ts}`;
+    const isNewEvent = await redis.setnx(eventKey, 1);
+    if (!isNewEvent) {
+      console.log(`[PROCESS:${processingId}] Skipping duplicate event ${event.ts}`);
+      return true; // Return true to indicate successful handling (by skipping)
+    }
+    
+    // Set expiry for the event key (5 minutes)
+    await redis.expire(eventKey, 300);
+
     // Enqueue the Slack message for processing
     console.log(`[PROCESS:${processingId}] Enqueueing message for processing`);
     await enqueueSlackMessage({
@@ -209,6 +220,7 @@ async function processSlackMessage(event: any, isAppMention = false, requestUrl?
       
       console.log(`[PROCESS:${processingId}] Triggering worker at ${baseUrl}/api/slack/rag-worker`);
       
+      // Don't await the fetch - fire and forget
       fetch(`${baseUrl}/api/slack/rag-worker?key=${workerSecret}`, { 
         method: 'POST',
         headers: {
@@ -296,7 +308,7 @@ export async function POST(request: Request) {
       
       // Immediately respond to Slack to acknowledge receipt
       console.log('[SLACK_POST] Sending acknowledge response to Slack');
-      return response;
+      return response; // CRITICAL FIX: Return the response object
     }
     
     // Handle other event types or return an error
