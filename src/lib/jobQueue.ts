@@ -45,51 +45,55 @@ const redisToken = process.env.UPSTASH_REDIS_TOKEN || '';
 console.log(`[REDIS_INIT] URL format valid: ${redisUrl.startsWith('https://')}`);
 console.log(`[REDIS_INIT] Token available: ${!!redisToken}`);
 
-// Create Redis factory function for on-demand clients to avoid stale connections
-function createRedisClient(): Redis {
+// Create a pure Redis client factory that doesn't depend on Queue's Redis type
+function createRedisClient() {
+  // Use the raw Redis constructor to avoid type issues
   return new Redis({
     url: redisUrl,
     token: redisToken,
-    automaticDeserialization: false, // Disable automatic deserialization to avoid type conflicts
+    automaticDeserialization: false // Prevent serialization issues
   });
 }
 
-// Initialize the Redis client
+// Create a direct Redis connection for raw operations
 const redis = createRedisClient();
 
-// Initialize the Upstash Queue with more robust error handling
-// @ts-ignore - Ignoring the type mismatch between Redis instances - this is a known issue with Upstash libraries
+// Function to directly add a message to the Redis queue without dependency on Queue
+async function directEnqueueMessageToRedis(job: SlackMessageJob): Promise<boolean> {
+  const jobId = `${job.userId}-${job.eventTs.substring(0, 8)}`;
+  console.log(`[DIRECT_REDIS:${jobId}] Enqueueing directly to Redis`);
+  
+  const serializedJob = JSON.stringify(job);
+  
+  try {
+    // Create a fresh Redis client
+    const client = createRedisClient();
+    
+    // Push to the waiting queue directly
+    const pushResult = await client.rpush('queue:slack-message-queue:waiting', serializedJob);
+    
+    console.log(`[DIRECT_REDIS:${jobId}] Push result: ${pushResult} (>0 means success)`);
+    
+    // Verify the queue size increased
+    const queueSize = await client.llen('queue:slack-message-queue:waiting');
+    console.log(`[DIRECT_REDIS:${jobId}] Queue size after push: ${queueSize}`);
+    
+    return pushResult > 0;
+  } catch (error) {
+    console.error(`[DIRECT_REDIS:${jobId}] Error during direct push:`, error);
+    return false;
+  }
+}
+
+// Initialize the Upstash Queue for compatibility, but don't rely on it
+// @ts-ignore - Type issues with Upstash libraries are known and documented
 export const slackMessageQueue = new Queue({
   redis,
   queueName: 'slack-message-queue',
   concurrencyLimit: 5,
-  deduplicationEnabled: true, // Prevent duplicate messages
-  deduplicationTtl: 300, // 5 minutes deduplication window
+  deduplicationEnabled: true,
+  deduplicationTtl: 300
 });
-
-// Function to directly add a message to the Redis queue
-// This bypasses the Queue library as a fallback mechanism
-async function directlyEnqueueMessage(job: SlackMessageJob): Promise<boolean> {
-  const jobId = `${job.userId}-${job.eventTs.substring(0, 8)}`;
-  console.log(`[JOB_QUEUE:${jobId}] Using direct Redis enqueuing as fallback`);
-  
-  try {
-    // Create a fresh Redis client for this operation
-    const directRedis = createRedisClient();
-    
-    // Push directly to the waiting queue
-    const pushResult = await directRedis.rpush(
-      'queue:slack-message-queue:waiting',
-      JSON.stringify(job)
-    );
-    
-    console.log(`[JOB_QUEUE:${jobId}] Direct push result: ${pushResult}`);
-    return pushResult > 0;
-  } catch (error) {
-    console.error(`[JOB_QUEUE:${jobId}] Direct enqueuing failed:`, error);
-    return false;
-  }
-}
 
 // Function to enqueue a Slack message job with enhanced reliability
 export async function enqueueSlackMessage(job: SlackMessageJob): Promise<boolean> {
@@ -99,117 +103,37 @@ export async function enqueueSlackMessage(job: SlackMessageJob): Promise<boolean
   // Validate and fix timestamp formats
   job = validateSlackTimestamps(job);
   
-  // Try the main Queue library approach first
-  let enqueueSuccess = false;
-  
+  // IMPORTANT CHANGE: Try direct Redis enqueue first as the most reliable method
   try {
-    // First verify Redis connection
-    try {
-      console.log(`[JOB_QUEUE:${jobId}] Testing Redis connection before enqueueing`);
-      // Use a fresh Redis client for the ping test
-      const testRedis = createRedisClient();
-      await testRedis.ping();
-      console.log(`[JOB_QUEUE:${jobId}] Redis connection test successful`);
-    } catch (pingError) {
-      console.error(`[JOB_QUEUE:${jobId}] Redis ping failed before enqueueing:`, pingError);
-      // Continue with enqueue attempt despite ping failure
+    console.log(`[JOB_QUEUE:${jobId}] Using direct Redis method first for reliability`);
+    const directSuccess = await directEnqueueMessageToRedis(job);
+    
+    if (directSuccess) {
+      console.log(`[JOB_QUEUE:${jobId}] Direct Redis enqueue successful`);
+      return true;
     }
-    
-    // Get queue info before enqueue
-    let initialQueueSize;
-    try {
-      // Use a fresh Redis client for getting the length
-      const checkRedis = createRedisClient();
-      initialQueueSize = await checkRedis.llen('queue:slack-message-queue:waiting');
-      console.log(`[JOB_QUEUE:${jobId}] Initial queue size: ${initialQueueSize}`);
-    } catch (lenError) {
-      console.error(`[JOB_QUEUE:${jobId}] Failed to get initial queue length:`, lenError);
-    }
-    
-    // IMPORTANT: Use the Queue library first for proper message formatting
-    console.log(`[JOB_QUEUE:${jobId}] Calling slackMessageQueue.sendMessage with properly formatted job`);
-    try {
-      const result = await slackMessageQueue.sendMessage(job);
-      console.log(`[JOB_QUEUE:${jobId}] Queue.sendMessage result: ${result}`);
-      
-      if (result) {
-        enqueueSuccess = true;
-      }
-    } catch (queueError) {
-      console.error(`[JOB_QUEUE:${jobId}] Queue.sendMessage failed:`, queueError);
-      // Continue to fallback
-    }
-    
-    // If Queue library fails, try direct Redis approach
-    if (!enqueueSuccess) {
-      console.log(`[JOB_QUEUE:${jobId}] Attempting direct Redis enqueuing as fallback`);
-      enqueueSuccess = await directlyEnqueueMessage(job);
-    }
-    
-    // Verify queue update
-    try {
-      // Use a fresh Redis client for checking the queue again
-      const verifyRedis = createRedisClient();
-      const newQueueSize = await verifyRedis.llen('queue:slack-message-queue:waiting');
-      console.log(`[JOB_QUEUE:${jobId}] New queue size after enqueue: ${newQueueSize}`);
-      
-      if (initialQueueSize !== undefined && newQueueSize <= initialQueueSize) {
-        console.warn(`[JOB_QUEUE:${jobId}] Queue size did not increase as expected. Before: ${initialQueueSize}, After: ${newQueueSize}`);
-        
-        // If verification failed but we thought we succeeded, try direct method again
-        if (enqueueSuccess && newQueueSize <= initialQueueSize) {
-          console.log(`[JOB_QUEUE:${jobId}] Queue verification failed, trying direct method again`);
-          enqueueSuccess = await directlyEnqueueMessage(job);
-          
-          // Verify one more time
-          const finalSize = await verifyRedis.llen('queue:slack-message-queue:waiting');
-          if (finalSize > newQueueSize) {
-            console.log(`[JOB_QUEUE:${jobId}] Final direct enqueue succeeded, queue size now: ${finalSize}`);
-            enqueueSuccess = true;
-          }
-        }
-      } else {
-        // Queue size increased, which confirms success
-        enqueueSuccess = true;
-      }
-    } catch (verifyError) {
-      console.error(`[JOB_QUEUE:${jobId}] Failed to verify queue update:`, verifyError);
-      // If we already have a success indicator, keep it
-    }
-    
-    // Final log message
-    if (enqueueSuccess) {
-      console.log(`[JOB_QUEUE:${jobId}] Successfully enqueued message for processing`);
-    } else {
-      console.error(`[JOB_QUEUE:${jobId}] Failed to enqueue message after all attempts`);
-    }
-    
-    return enqueueSuccess;
-  } catch (error) {
-    console.error(`[JOB_QUEUE:${jobId}] Failed to enqueue message:`, error);
-    
-    // Enhanced error logging
-    if (error instanceof Error) {
-      console.error(`[JOB_QUEUE:${jobId}] Error type: ${error.name}`);
-      console.error(`[JOB_QUEUE:${jobId}] Error message: ${error.message}`);
-      if (error.stack) {
-        console.error(`[JOB_QUEUE:${jobId}] Error stack: ${error.stack}`);
-      }
-      if ('cause' in error) {
-        console.error(`[JOB_QUEUE:${jobId}] Error cause:`, error.cause);
-      }
-    }
-    
-    console.error(`[JOB_QUEUE:${jobId}] Redis config - URL starts with ${redisUrl.substring(0, 8)}, token length: ${redisToken.length}`);
-    
-    // Try direct method as a last resort
-    try {
-      return await directlyEnqueueMessage(job);
-    } catch (directError) {
-      console.error(`[JOB_QUEUE:${jobId}] Direct enqueuing also failed:`, directError);
-      return false;
-    }
+  } catch (directError) {
+    console.error(`[JOB_QUEUE:${jobId}] Direct Redis method failed:`, directError);
+    // Continue to fallback methods
   }
+  
+  // Try the Queue library as fallback
+  try {
+    console.log(`[JOB_QUEUE:${jobId}] Trying Queue library as fallback`);
+    const result = await slackMessageQueue.sendMessage(job);
+    console.log(`[JOB_QUEUE:${jobId}] Queue.sendMessage result: ${result}`);
+    
+    if (result) {
+      console.log(`[JOB_QUEUE:${jobId}] Queue library enqueue successful`);
+      return true;
+    }
+  } catch (queueError) {
+    console.error(`[JOB_QUEUE:${jobId}] Queue library failed:`, queueError);
+    // We already tried direct Redis, so at this point we've exhausted options
+  }
+  
+  console.error(`[JOB_QUEUE:${jobId}] All enqueue methods failed`);
+  return false;
 }
 
 // Helper function to ensure timestamps are in Slack's expected format

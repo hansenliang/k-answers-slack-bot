@@ -56,27 +56,63 @@ async function notifyUserOfFailure(job: SlackMessageJob, error: any): Promise<vo
   }
 }
 
-// Get direct message from Redis if queue library fails
+// Modify the getDirectMessageFromRedis function to be more reliable
 async function getDirectMessageFromRedis(): Promise<{streamId: string, body: SlackMessageJob} | null> {
   try {
-    console.log('[WORKER] Attempting to directly access Redis queue');
+    console.log('[WORKER] Attempting direct Redis access to retrieve messages');
     
-    const directJob = await getJobFromRedis();
+    // Create a fresh Redis client
+    const redis = createRedisClient();
     
-    if (!directJob) {
-      console.log('[WORKER] No items found in Redis queue');
+    // Check if there are any messages
+    const queueLength = await redis.llen('queue:slack-message-queue:waiting');
+    console.log(`[WORKER] Direct Redis check: ${queueLength} message(s) in queue`);
+    
+    if (queueLength === 0) {
+      console.log('[WORKER] No messages found in Redis queue');
       return null;
     }
     
-    console.log('[WORKER] Found item in direct Redis queue');
+    // Get the first message
+    const items = await redis.lrange('queue:slack-message-queue:waiting', 0, 0);
+    if (!items || items.length === 0) {
+      console.log('[WORKER] Queue length > 0 but lrange returned no items');
+      return null;
+    }
     
-    // Return in the correct format
-    return {
-      streamId: `manual-${Date.now()}`,
-      body: directJob.job
-    };
+    // Try to parse the message
+    try {
+      // Log the raw message for debugging
+      console.log(`[WORKER] Raw message from Redis: ${items[0].substring(0, 100)}...`);
+      
+      const job = JSON.parse(items[0]);
+      console.log('[WORKER] Successfully parsed message from Redis');
+      
+      // Remove the message from the queue to prevent reprocessing
+      const removeResult = await redis.lrem('queue:slack-message-queue:waiting', 1, items[0]);
+      console.log(`[WORKER] Removed message from queue, result: ${removeResult}`);
+      
+      if (!job.channelId || !job.userId || !job.questionText) {
+        console.error('[WORKER] Parsed job is missing required fields');
+        console.log('[WORKER] Job content:', job);
+        return null;
+      }
+      
+      return {
+        streamId: `direct-${Date.now()}`,
+        body: job
+      };
+    } catch (parseError) {
+      console.error('[WORKER] Error parsing message from Redis:', parseError);
+      
+      // If we can't parse it, remove it from the queue to prevent blocking
+      await redis.lrem('queue:slack-message-queue:waiting', 1, items[0]);
+      console.log('[WORKER] Removed unparseable message from queue');
+      
+      return null;
+    }
   } catch (error) {
-    console.error('[WORKER] Error directly accessing Redis:', error);
+    console.error('[WORKER] Error accessing Redis directly:', error);
     return null;
   }
 }
@@ -173,7 +209,7 @@ async function processJob(job: SlackMessageJob): Promise<boolean> {
           
           await sendSlackMessageWithRetry({
             channel: job.channelId,
-            text: 'I\'m working on your question. This might take a minute...',
+            text: 'Still working on it... this question needs a bit more time.',
             thread_ts: thread_ts
           });
           waitingMessageSent = true;
@@ -182,24 +218,13 @@ async function processJob(job: SlackMessageJob): Promise<boolean> {
           console.error(`[WORKER:${jobId}] Error sending waiting message:`, waitError);
         }
         resolve();
-      }, 2000); // Send waiting message after 2 seconds - faster response
+      }, 10000); // Increase to 10 seconds since we already sent initial acknowledgment
     });
 
     // Process the request with timeout
     try {
-      // Send initial acknowledgment message immediately
-      try {
-        const thread_ts = job.threadTs || job.eventTs;
-        await sendSlackMessageWithRetry({
-          channel: job.channelId,
-          text: 'I received your question and am working on it...',
-          thread_ts: thread_ts
-        });
-        console.log(`[WORKER:${jobId}] Sent immediate acknowledgment to user`);
-      } catch (ackError) {
-        console.error(`[WORKER:${jobId}] Failed to send acknowledgment:`, ackError);
-        // Continue processing even if acknowledgment fails
-      }
+      // REMOVED: Initial acknowledgment - we've already sent it in the events handler
+      // Just process the query directly
       
       // Race between the actual processing and timeout
       const result = await Promise.race([
@@ -559,14 +584,41 @@ async function handleWorkerRequest(request: Request) {
     console.log(`[WORKER] Auth details: Query key present: ${!!queryKey}, Bearer token present: ${!!bearerToken}, Expected key present: ${!!expectedKey}`);
     console.log(`[WORKER] Request type: ${isCronJob ? 'Vercel cron' : isChained ? 'Chained call' : isDirectTrigger ? 'Direct trigger' : isDiagnostic ? 'Diagnostic' : isSlackEvent ? 'Slack event' : 'External call'}`);
     
-    // Check authorization - accept either query param or bearer token, or cron jobs and diagnostics without auth
-    const isAuthorized = isCronJob || 
+    // Enhanced cron job detection 
+    const isVercelCron = isCronJob || 
+                         request.headers.get('x-vercel-cron') === 'true' || 
+                         request.headers.get('x-vercel-id')?.includes('cron');
+    
+    // Log details about the request for better debugging
+    if (isVercelCron) {
+      console.log('[WORKER] Detected Vercel cron job request');
+      // Log all Vercel-specific headers
+      const vercelHeaders = Array.from(request.headers.entries())
+        .filter(([key]) => key.toLowerCase().startsWith('x-vercel'))
+        .map(([key, value]) => `${key}: ${value}`);
+      
+      if (vercelHeaders.length > 0) {
+        console.log(`[WORKER] Vercel-specific headers: ${JSON.stringify(vercelHeaders)}`);
+      }
+    }
+    
+    // Expanded authorization check
+    const isAuthorized = isVercelCron || 
                         (queryKey && queryKey === expectedKey) || 
                         (bearerToken && bearerToken === expectedKey) ||
-                        isDiagnostic; // Allow diagnostic calls
+                        isDiagnostic || 
+                        request.headers.get('X-Trigger-Source') === 'force-worker';
     
     if (!isAuthorized) {
       console.error('[WORKER] Unauthorized access attempt. Check WORKER_SECRET_KEY environment variable.');
+      console.log('[WORKER] Authorization details:', {
+        isVercelCron,
+        hasQueryKey: !!queryKey, 
+        queryKeyValid: queryKey === expectedKey,
+        hasBearerToken: !!bearerToken,
+        isDiagnostic,
+        triggerSource: request.headers.get('X-Trigger-Source')
+      });
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
     }
     
@@ -599,58 +651,56 @@ async function handleWorkerRequest(request: Request) {
     processingStage = "message_retrieval";
     let message;
     try {
-      // First try the Queue library approach
-      try {
-        message = await slackMessageQueue.receiveMessage<SlackMessageJob>();
-        console.log('[WORKER] receiveMessage completed, result:', message ? 'Message received' : 'No message found');
-      } catch (queueError) {
-        console.error('[WORKER] Error receiving message from queue:', queueError);
-        message = null;
+      // Use direct Redis access FIRST as the more reliable method
+      console.log('[WORKER] Trying direct Redis access first (most reliable)');
+      message = await getDirectMessageFromRedis();
+      
+      // Only try the Queue library if direct access failed
+      if (!message) {
+        console.log('[WORKER] Direct Redis access returned no messages, trying Queue library');
+        try {
+          message = await slackMessageQueue.receiveMessage<SlackMessageJob>();
+          console.log('[WORKER] Queue library receiveMessage result:', message ? 'Message received' : 'No message found');
+        } catch (queueError) {
+          console.error('[WORKER] Error receiving message via Queue library:', queueError);
+          message = null;
+        }
       }
       
       if (!message) {
-        console.log('[WORKER] No messages in queue via library, trying direct Redis access');
+        console.log('[WORKER] No messages found through any method');
         
-        // Try direct Redis access
-        message = await getDirectMessageFromRedis();
-        
-        if (!message) {
-          // Check queue directly as a last resort
-          try {
-            const redis = createRedisClient();
-            
-            // Double-check queue length via direct Redis
-            const queueLength = await redis.llen('queue:slack-message-queue:waiting');
-            console.log(`[WORKER] Double-check queue length via direct Redis: ${queueLength}`);
-            
-            if (queueLength > 0) {
-              console.warn('[WORKER] Queue has items but we failed to get them - scheduling retry');
-              
-              // Auto-retry in case this is a transient issue
-              const baseUrl = process.env.VERCEL_ENV === 'production' 
-                ? 'https://k-answers-bot.vercel.app' 
-                : process.env.VERCEL_URL 
-                  ? `https://${process.env.VERCEL_URL}` 
-                  : 'http://localhost:3000';
-              
-              // Chain worker execution with a delay
-              setTimeout(() => {
-                chainWorkerExecution(baseUrl, expectedKey);
-              }, 5000); // 5 second delay
-            }
-          } catch (directError) {
-            console.error('[WORKER] Error checking queue length directly:', directError);
-          }
+        // Final queue check for debugging
+        try {
+          const redis = createRedisClient();
+          const queueLength = await redis.llen('queue:slack-message-queue:waiting');
+          console.log(`[WORKER] Final queue length check: ${queueLength} messages waiting`);
           
-          if (isDiagnostic) {
-            return NextResponse.json({ 
-              status: 'diagnostic_complete',
-              message: 'No jobs in queue to process',
-              queueChecked: true
-            });
-          } else {
-            return NextResponse.json({ status: 'no_jobs' });
+          if (queueLength > 0) {
+            console.warn('[WORKER] Queue has messages but we could not retrieve them');
+            
+            // Get raw message for debugging
+            try {
+              const items = await redis.lrange('queue:slack-message-queue:waiting', 0, 0);
+              if (items && items.length > 0) {
+                console.log(`[WORKER] First raw message: ${items[0].substring(0, 100)}...`);
+              }
+            } catch (rangeError) {
+              console.error('[WORKER] Error getting raw message:', rangeError);
+            }
           }
+        } catch (finalError) {
+          console.error('[WORKER] Error in final queue check:', finalError);
+        }
+        
+        if (isDiagnostic) {
+          return NextResponse.json({ 
+            status: 'diagnostic_complete',
+            message: 'No jobs in queue to process',
+            queueChecked: true
+          });
+        } else {
+          return NextResponse.json({ status: 'no_jobs' });
         }
       }
       
