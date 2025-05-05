@@ -191,19 +191,44 @@ async function processSlackMessage(event: any, isAppMention = false, requestUrl?
     
     // Fire-and-forget trigger so the first job is processed immediately
     try {
-      // Use the request URL's origin if available, otherwise fallback to a default
-      const baseUrl = requestUrl 
-        ? new URL(requestUrl).origin 
-        : process.env.VERCEL_URL 
-          ? `https://${process.env.VERCEL_URL}` 
-          : 'http://localhost:3000';
+      // Use a hardcoded production domain if in production, otherwise use the request URL
+      const baseUrl = process.env.VERCEL_ENV === 'production' 
+        ? 'https://k-answers-bot.vercel.app' 
+        : requestUrl 
+          ? new URL(requestUrl).origin 
+          : process.env.VERCEL_URL 
+            ? `https://${process.env.VERCEL_URL}` 
+            : 'http://localhost:3000';
       
-      fetch(`${baseUrl}/api/slack/rag-worker?key=${process.env.WORKER_SECRET}`, { 
-        method: 'POST' 
-      }).catch(error => {
-        console.error(`[PROCESS:${processingId}] Non-blocking error triggering worker:`, error);
+      // IMPORTANT: Use WORKER_SECRET_KEY which is what the worker endpoint checks for
+      const workerSecret = process.env.WORKER_SECRET_KEY || '';
+      
+      if (!workerSecret) {
+        console.warn(`[PROCESS:${processingId}] WORKER_SECRET_KEY environment variable is not set`);
+      }
+      
+      console.log(`[PROCESS:${processingId}] Triggering worker at ${baseUrl}/api/slack/rag-worker`);
+      
+      fetch(`${baseUrl}/api/slack/rag-worker?key=${workerSecret}`, { 
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Trigger-Source': 'slack_events'
+        }
+      })
+      .then(response => {
+        if (!response.ok) {
+          console.error(`[PROCESS:${processingId}] Worker trigger failed with status ${response.status}`);
+          return response.text().then(text => {
+            console.error(`[PROCESS:${processingId}] Worker error response: ${text}`);
+          });
+        } else {
+          console.log(`[PROCESS:${processingId}] Worker successfully triggered with status ${response.status}`);
+        }
+      })
+      .catch(error => {
+        console.error(`[PROCESS:${processingId}] Error triggering worker:`, error);
       });
-      console.log(`[PROCESS:${processingId}] Triggered worker to process queue at ${baseUrl}/api/slack/rag-worker`);
     } catch (triggerError) {
       console.error(`[PROCESS:${processingId}] Error triggering worker (non-blocking):`, triggerError);
     }
