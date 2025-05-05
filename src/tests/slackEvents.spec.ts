@@ -1,75 +1,104 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { NextRequest, NextResponse } from 'next/server';
+import { jest, describe, it, expect, beforeEach, afterEach } from '@jest/globals';
 import { POST } from '../app/api/slack/events/route';
 
-// Mock dependencies
-vi.mock('next/server', async () => {
-  const actual = await vi.importActual('next/server');
-  return {
-    ...actual,
-    NextResponse: {
-      json: vi.fn().mockImplementation((body, options) => ({ body, options }))
-    }
-  };
-});
+// Mock NextRequest and NextResponse
+class MockNextRequest {
+  constructor(url, options = {}) {
+    this.url = url;
+    this.method = options.method || 'GET';
+    this.body = options.body || '';
+    this.headers = new Headers(options.headers || {});
+  }
 
-vi.mock('@slack/web-api', () => ({
+  text() {
+    return Promise.resolve(this.body);
+  }
+
+  json() {
+    return Promise.resolve(JSON.parse(this.body));
+  }
+}
+
+const mockNextResponse = {
+  json: jest.fn().mockImplementation((body, options = {}) => ({
+    body,
+    status: options.status || 200
+  }))
+};
+
+// Mock dependencies
+jest.mock('next/server', () => ({
+  NextResponse: {
+    json: jest.fn().mockImplementation((body, options = {}) => ({
+      body,
+      status: options.status || 200
+    }))
+  }
+}));
+
+jest.mock('@slack/web-api', () => ({
   WebClient: class MockWebClient {
     auth = {
-      test: vi.fn().mockResolvedValue({ user_id: 'U123456' })
+      test: jest.fn().mockResolvedValue({ user_id: 'U123456' })
     };
     chat = {
-      postMessage: vi.fn().mockResolvedValue({ ts: '1234.5678' })
+      postMessage: jest.fn().mockResolvedValue({ ts: '1234.5678' })
     };
   }
 }));
 
-vi.mock('crypto', () => ({
-  timingSafeEqual: vi.fn().mockReturnValue(true),
-  createHmac: vi.fn().mockReturnValue({
-    update: vi.fn().mockReturnThis(),
-    digest: vi.fn().mockReturnValue('valid-signature')
+jest.mock('crypto', () => ({
+  timingSafeEqual: jest.fn().mockReturnValue(true),
+  createHmac: jest.fn().mockReturnValue({
+    update: jest.fn().mockReturnThis(),
+    digest: jest.fn().mockReturnValue('valid-signature')
   })
 }));
 
-vi.mock('@upstash/redis', () => ({
+jest.mock('@upstash/redis', () => ({
   Redis: class MockRedis {
-    incr = vi.fn().mockResolvedValue(1);
-    expire = vi.fn().mockResolvedValue(true);
-    setnx = vi.fn().mockResolvedValue(1);
-    ping = vi.fn().mockResolvedValue('PONG');
+    constructor() {
+      this.data = new Map();
+    }
+    incr = jest.fn().mockResolvedValue(1);
+    expire = jest.fn().mockResolvedValue(true);
+    setnx = jest.fn().mockResolvedValue(1);
+    ping = jest.fn().mockResolvedValue('PONG');
   }
 }));
 
-vi.mock('@/lib/jobQueue', () => ({
-  enqueueSlackMessage: vi.fn().mockResolvedValue(true)
+jest.mock('@/lib/jobQueue', () => ({
+  enqueueSlackMessage: jest.fn().mockResolvedValue(true)
 }));
 
-vi.mock('@/lib/env', () => ({
+jest.mock('@/lib/env', () => ({
   SLACK_BOT_TOKEN: 'xoxb-test-token',
   SLACK_SIGNING_SECRET: 'test-signing-secret',
-  validateSlackEnvironment: vi.fn().mockReturnValue({ valid: true, missing: [] }),
-  logEnvironmentStatus: vi.fn()
+  validateSlackEnvironment: jest.fn().mockReturnValue({ valid: true, missing: [] }),
+  logEnvironmentStatus: jest.fn()
 }));
 
 // Mock global fetch
-global.fetch = vi.fn().mockResolvedValue({
-  ok: true,
-  status: 200,
-  text: vi.fn().mockResolvedValue('OK')
-});
+global.fetch = jest.fn().mockImplementation(() => 
+  Promise.resolve({
+    ok: true,
+    status: 200,
+    text: () => Promise.resolve('OK')
+  })
+);
 
 describe('Slack Events API Handler', () => {
   beforeEach(() => {
-    vi.clearAllMocks();
+    jest.clearAllMocks();
   });
 
   afterEach(() => {
-    vi.resetAllMocks();
+    jest.resetAllMocks();
   });
 
   it('should return challenge for url_verification', async () => {
-    const mockRequest = new NextRequest(
+    // Setup
+    const mockRequest = new MockNextRequest(
       'https://example.com/api/slack/events',
       {
         method: 'POST',
@@ -83,14 +112,17 @@ describe('Slack Events API Handler', () => {
       }
     );
 
+    // Execute
     const response = await POST(mockRequest);
     
-    expect(NextResponse.json).toHaveBeenCalledWith({ challenge: 'test-challenge-token' });
+    // Verify
+    expect(mockNextResponse.json).toHaveBeenCalledWith({ challenge: 'test-challenge-token' });
     expect(response).toBeDefined();
   });
 
   it('should acknowledge app_mention events within 3 seconds', async () => {
-    const mockRequest = new NextRequest(
+    // Setup
+    const mockRequest = new MockNextRequest(
       'https://example.com/api/slack/events',
       {
         method: 'POST',
@@ -115,14 +147,15 @@ describe('Slack Events API Handler', () => {
     // Start timer
     const startTime = Date.now();
     
+    // Execute
     const response = await POST(mockRequest);
     
     // End timer
     const endTime = Date.now();
     const duration = endTime - startTime;
     
-    // Check that response is sent
-    expect(NextResponse.json).toHaveBeenCalledWith({ ok: true });
+    // Verify
+    expect(mockNextResponse.json).toHaveBeenCalledWith({ ok: true });
     expect(response).toBeDefined();
     
     // Verify it returns within 3 seconds (should be much faster in tests)
@@ -130,13 +163,21 @@ describe('Slack Events API Handler', () => {
   });
 
   it('should deduplicate events with the same timestamp', async () => {
-    // Mock Redis setnx to return 1 for first call and 0 for second (already exists)
-    const mockRedis = vi.mocked(require('@upstash/redis').Redis);
-    const mockSetnx = vi.fn()
-      .mockResolvedValueOnce(1) // First call returns 1 (key set)
-      .mockResolvedValueOnce(0); // Second call returns 0 (key already exists)
+    // Setup - Mock Redis setnx to return 1 for first call and 0 for second (already exists)
+    const { enqueueSlackMessage } = require('@/lib/jobQueue');
     
-    mockRedis.prototype.setnx = mockSetnx;
+    // First setup mock Redis
+    const redisModule = require('@upstash/redis');
+    const mockRedisInstance = {
+      setnx: jest.fn()
+        .mockResolvedValueOnce(1) // First call returns 1 (key set)
+        .mockResolvedValueOnce(0), // Second call returns 0 (key already exists)
+      expire: jest.fn().mockResolvedValue(true),
+      ping: jest.fn().mockResolvedValue('PONG')
+    };
+    
+    // Replace the Redis constructor with a function that returns our mock
+    redisModule.Redis = jest.fn().mockImplementation(() => mockRedisInstance);
     
     const mockEvent = {
       type: 'event_callback',
@@ -150,7 +191,7 @@ describe('Slack Events API Handler', () => {
     };
     
     // Create first request
-    const mockRequest1 = new NextRequest(
+    const mockRequest1 = new MockNextRequest(
       'https://example.com/api/slack/events',
       {
         method: 'POST',
@@ -164,7 +205,7 @@ describe('Slack Events API Handler', () => {
     );
     
     // Create second request (same event)
-    const mockRequest2 = new NextRequest(
+    const mockRequest2 = new MockNextRequest(
       'https://example.com/api/slack/events',
       {
         method: 'POST',
@@ -177,17 +218,16 @@ describe('Slack Events API Handler', () => {
       }
     );
     
-    // Process both requests
+    // Execute - Process both requests
     await POST(mockRequest1);
     await POST(mockRequest2);
     
     // Verify Redis setnx was called twice with same event key
-    expect(mockSetnx).toHaveBeenCalledTimes(2);
-    expect(mockSetnx.mock.calls[0][0]).toBe('event:1234.5678');
-    expect(mockSetnx.mock.calls[1][0]).toBe('event:1234.5678');
+    expect(mockRedisInstance.setnx).toHaveBeenCalledTimes(2);
+    expect(mockRedisInstance.setnx.mock.calls[0][0]).toBe('event:1234.5678');
+    expect(mockRedisInstance.setnx.mock.calls[1][0]).toBe('event:1234.5678');
     
     // Verify enqueueSlackMessage was called only once
-    const { enqueueSlackMessage } = require('@/lib/jobQueue');
     expect(enqueueSlackMessage).toHaveBeenCalledTimes(1);
   });
 }); 
