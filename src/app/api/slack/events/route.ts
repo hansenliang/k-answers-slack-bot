@@ -1,8 +1,9 @@
 import { NextResponse } from 'next/server';
 import { WebClient } from '@slack/web-api';
 import { timingSafeEqual, createHmac } from 'crypto';
-import { queryRag } from '@/lib/rag';
+import { enqueueSlackMessage } from '@/lib/jobQueue';
 import { SLACK_BOT_TOKEN, SLACK_SIGNING_SECRET, validateSlackEnvironment, logEnvironmentStatus } from '@/lib/env';
+import { Redis } from '@upstash/redis';
 
 // Set runtime to nodejs to support Node.js built-in modules
 export const runtime = 'nodejs';
@@ -20,6 +21,12 @@ if (!slackEnv.valid) {
 console.log('[SLACK_INIT] Initializing Slack WebClient');
 const webClient = new WebClient(SLACK_BOT_TOKEN);
 console.log('[SLACK_INIT] WebClient initialized');
+
+// Initialize Redis client
+const redis = new Redis({
+  url: process.env.UPSTASH_REDIS_URL || '',
+  token: process.env.UPSTASH_REDIS_TOKEN || '',
+});
 
 // Cache for bot ID to avoid repeated API calls
 let botUserIdCache: string | null = null;
@@ -43,55 +50,38 @@ async function getBotUserId(): Promise<string> {
   }
 }
 
-// Rate limiting implementation
-interface RateLimitData {
-  count: number;
-  lastResetTime: number;
-}
-
-// In-memory rate limit store
-const userRateLimits: Map<string, RateLimitData> = new Map();
+// Rate limiting configuration
 const MAX_REQUESTS_PER_MINUTE = 5;
 const RATE_LIMIT_WINDOW_MS = 60 * 1000; // 1 minute
 console.log(`[SLACK_CONFIG] Rate limit config: ${MAX_REQUESTS_PER_MINUTE} requests per ${RATE_LIMIT_WINDOW_MS/1000} seconds`);
 
-// Rate limiting function
-function checkRateLimit(userId: string): boolean {
+// Redis-based rate limiting function
+async function checkRateLimit(userId: string): Promise<boolean> {
   console.log(`[RATE_LIMIT] Checking rate limit for user ${userId}`);
-  const now = Date.now();
-  const userData = userRateLimits.get(userId);
-
-  if (!userData) {
-    // First request from this user
-    console.log(`[RATE_LIMIT] First request from user ${userId}`);
-    userRateLimits.set(userId, {
-      count: 1,
-      lastResetTime: now,
-    });
+  
+  try {
+    const key = `rate:${userId}`;
+    const count = await redis.incr(key);
+    
+    // Set expiry for 60 seconds if this is the first request
+    if (count === 1) {
+      await redis.expire(key, 60);
+    }
+    
+    console.log(`[RATE_LIMIT] User ${userId} request count: ${count}/${MAX_REQUESTS_PER_MINUTE}`);
+    
+    // Check if user has exceeded the rate limit
+    if (count > MAX_REQUESTS_PER_MINUTE) {
+      console.log(`[RATE_LIMIT] User ${userId} has exceeded rate limit: ${count}/${MAX_REQUESTS_PER_MINUTE}`);
+      return false;
+    }
+    
+    return true;
+  } catch (error) {
+    console.error(`[RATE_LIMIT] Error checking rate limit for user ${userId}:`, error);
+    // Default to allowing the request if rate limiting fails
     return true;
   }
-
-  // Check if we need to reset the window
-  if (now - userData.lastResetTime > RATE_LIMIT_WINDOW_MS) {
-    console.log(`[RATE_LIMIT] Resetting window for user ${userId}`);
-    userRateLimits.set(userId, {
-      count: 1,
-      lastResetTime: now,
-    });
-    return true;
-  }
-
-  // Check if user has exceeded the rate limit
-  if (userData.count >= MAX_REQUESTS_PER_MINUTE) {
-    console.log(`[RATE_LIMIT] User ${userId} has exceeded rate limit: ${userData.count}/${MAX_REQUESTS_PER_MINUTE}`);
-    return false;
-  }
-
-  // Increment the count
-  userData.count += 1;
-  userRateLimits.set(userId, userData);
-  console.log(`[RATE_LIMIT] User ${userId} request count: ${userData.count}/${MAX_REQUESTS_PER_MINUTE}`);
-  return true;
 }
 
 // Verify Slack request signature
@@ -136,8 +126,8 @@ function verifySlackRequest(
   }
 }
 
-// Process Slack message and handle RAG response
-async function processSlackMessage(event: any, isAppMention = false) {
+// Process Slack message by enqueueing it for RAG processing
+async function processSlackMessage(event: any, isAppMention = false, requestUrl?: string): Promise<boolean> {
   const eventId = event.event_ts;
   const processingId = `direct-${eventId.substring(0, 8)}`;
 
@@ -145,7 +135,7 @@ async function processSlackMessage(event: any, isAppMention = false) {
     // Skip if message is from a bot (prevent loops)
     if (event.bot_id || event.subtype === 'bot_message') {
       console.log(`[PROCESS:${processingId}] Ignoring message from a bot`);
-      return;
+      return false;
     }
     
     const userId = event.user;
@@ -153,7 +143,7 @@ async function processSlackMessage(event: any, isAppMention = false) {
     const threadTs = event.thread_ts || event.ts;
     
     // Check rate limit
-    if (!checkRateLimit(userId)) {
+    if (!await checkRateLimit(userId)) {
       console.log(`[PROCESS:${processingId}] User ${userId} hit rate limit, sending notification`);
       
       await webClient.chat.postMessage({
@@ -161,7 +151,7 @@ async function processSlackMessage(event: any, isAppMention = false) {
         thread_ts: threadTs,
         text: "You've hit your rate limit (5 questions/min). Please wait a moment and try again."
       });
-      return;
+      return false;
     }
     
     // Extract question text
@@ -185,89 +175,43 @@ async function processSlackMessage(event: any, isAppMention = false) {
     // If we don't have valid text or channel, we can't proceed
     if (questionText === "[No text provided]" || !channelId) {
       console.error(`[PROCESS:${processingId}] Cannot process message: ${!channelId ? 'Missing channelId' : 'No text provided'}`);
-      return;
+      return false;
     }
 
-    // Send "Thinking..." message
-    console.log(`[PROCESS:${processingId}] Sending initial thinking message`);
-    const initialResponse = await webClient.chat.postMessage({
-      channel: channelId,
-      thread_ts: threadTs,
-      text: "Thinking...",
-      blocks: [
-        {
-          type: "section",
-          text: {
-            type: "mrkdwn",
-            text: "Thinking..."
-          }
-        }
-      ]
+    // Enqueue the Slack message for processing
+    console.log(`[PROCESS:${processingId}] Enqueueing message for processing`);
+    await enqueueSlackMessage({
+      channelId,
+      userId,
+      questionText,
+      threadTs: event.thread_ts ?? event.ts,
+      eventTs: event.ts,
+      useStreaming: false
     });
-
-    const messageTs = initialResponse.ts as string;
-    console.log(`[PROCESS:${processingId}] Initial message sent with ts: ${messageTs}`);
-
-    // Process with RAG
+    
+    // Fire-and-forget trigger so the first job is processed immediately
     try {
-      console.log(`[PROCESS:${processingId}] Querying RAG system`);
-      const answer = await queryRag(questionText);
+      // Use the request URL's origin if available, otherwise fallback to a default
+      const baseUrl = requestUrl 
+        ? new URL(requestUrl).origin 
+        : process.env.VERCEL_URL 
+          ? `https://${process.env.VERCEL_URL}` 
+          : 'http://localhost:3000';
       
-      // Update the message with the answer
-      console.log(`[PROCESS:${processingId}] Updating message with RAG answer`);
-      await webClient.chat.update({
-        channel: channelId,
-        ts: messageTs,
-        text: answer, // Fallback text for notifications
-        blocks: [
-          {
-            type: "section",
-            text: {
-              type: "mrkdwn",
-              text: answer
-            }
-          },
-          {
-            type: "context",
-            elements: [
-              {
-                type: "mrkdwn",
-                text: "This response was generated by AI and may not be completely accurate. Please verify any important information."
-              }
-            ]
-          }
-        ]
+      fetch(`${baseUrl}/api/slack/rag-worker?key=${process.env.WORKER_SECRET}`, { 
+        method: 'POST' 
+      }).catch(error => {
+        console.error(`[PROCESS:${processingId}] Non-blocking error triggering worker:`, error);
       });
-      
-      console.log(`[PROCESS:${processingId}] Message successfully updated with answer`);
-    } catch (ragError) {
-      console.error(`[PROCESS:${processingId}] Error during RAG processing:`, ragError);
-      
-      // Update with error message
-      try {
-        await webClient.chat.update({
-          channel: channelId,
-          ts: messageTs,
-          text: "I'm sorry, I encountered an error while processing your question. Please try again later."
-        });
-      } catch (updateError) {
-        console.error(`[PROCESS:${processingId}] Error updating message with error:`, updateError);
-      }
+      console.log(`[PROCESS:${processingId}] Triggered worker to process queue at ${baseUrl}/api/slack/rag-worker`);
+    } catch (triggerError) {
+      console.error(`[PROCESS:${processingId}] Error triggering worker (non-blocking):`, triggerError);
     }
+    
+    return true;
   } catch (error) {
     console.error(`[PROCESS:${processingId}] Error in message processing:`, error);
-    
-    // Attempt to send an error message
-    try {
-      if (event.channel) {
-        await webClient.chat.postMessage({
-          channel: event.channel,
-          text: "I encountered an error while processing your message. Please try again later."
-        });
-      }
-    } catch (msgError) {
-      console.error(`[PROCESS:${processingId}] Error sending error message:`, msgError);
-    }
+    return false;
   }
 }
 
@@ -310,26 +254,17 @@ export async function POST(request: Request) {
     if (body.type === 'event_callback') {
       console.log('[SLACK_POST] Processing event callback', { event_type: body.event?.type });
       
-      // CRITICAL: Acknowledge receipt immediately
+      // CRITICAL: Create response immediately to acknowledge receipt
       const response = NextResponse.json({ ok: true });
       
-      // Process the event asynchronously after responding
-      if (body.event.type === 'app_mention') {
-        console.log('[SLACK_POST] Starting background processing for app_mention');
+      // Enqueue the event asynchronously after responding - no setTimeout needed
+      if (body.event.type === 'app_mention' || body.event.type === 'message') {
+        const isAppMention = body.event.type === 'app_mention';
+        console.log(`[SLACK_POST] Starting async processing for ${isAppMention ? 'app_mention' : 'message'}`);
         
-        // Use setTimeout with 0 delay to ensure this runs after the response is sent
-        setTimeout(() => {
-          processSlackMessage(body.event, true)
-            .catch(error => console.error('[SLACK_POST] Async error in app_mention handler:', error));
-        }, 0);
-      } else if (body.event.type === 'message') {
-        console.log('[SLACK_POST] Starting background processing for message');
-        
-        // Use setTimeout with 0 delay to ensure this runs after the response is sent
-        setTimeout(() => {
-          processSlackMessage(body.event, false)
-            .catch(error => console.error('[SLACK_POST] Async error in direct message handler:', error));
-        }, 0);
+        // Fire and forget - don't await the result to avoid blocking the response
+        processSlackMessage(body.event, isAppMention, request.url)
+          .catch(error => console.error(`[SLACK_POST] Async error in ${isAppMention ? 'app_mention' : 'message'} handler:`, error));
       } else {
         console.log(`[SLACK_POST] Ignoring unsupported event type: ${body.event.type}`);
       }
