@@ -31,6 +31,26 @@ async function hasMoreJobs(): Promise<number> {
   }
 }
 
+// Add a fallback mechanism in case the worker fails to process a message
+async function notifyUserOfFailure(job: SlackMessageJob, error: any): Promise<void> {
+  if (!webClient) {
+    console.error('[WORKER:FALLBACK] Cannot notify user - no Slack client');
+    return;
+  }
+  
+  try {
+    console.log(`[WORKER:FALLBACK] Sending error notification to user ${job.userId} in channel ${job.channelId}`);
+    
+    await sendSlackMessageWithRetry({
+      channel: job.channelId,
+      thread_ts: job.threadTs || job.eventTs,
+      text: `Sorry, I'm having trouble processing your request. The error was: ${error.message || 'Unknown error'}`
+    });
+  } catch (notifyError) {
+    console.error('[WORKER:FALLBACK] Failed to send error notification:', notifyError);
+  }
+}
+
 // Get direct message from Redis if queue library fails
 async function getDirectMessageFromRedis(): Promise<{streamId: string, body: SlackMessageJob} | null> {
   try {
@@ -57,15 +77,27 @@ async function getDirectMessageFromRedis(): Promise<{streamId: string, body: Sla
       
       // If it's already in the right format
       if (parsedItem.streamId && parsedItem.body) {
-        // Remove the item from the queue
-        await redis.lrem('queue:slack-message-queue:waiting', 1, items[0]);
+        // Remove the item from the queue to avoid reprocessing
+        try {
+          await redis.lrem('queue:slack-message-queue:waiting', 1, items[0]);
+          console.log('[WORKER] Successfully removed processed item from queue');
+        } catch (removeError) {
+          console.error('[WORKER] Failed to remove item from queue:', removeError);
+          // Continue anyway, better to process twice than not at all
+        }
         return parsedItem;
       }
       
       // If it's a direct job (not wrapped)
       if (parsedItem.channelId && parsedItem.userId && parsedItem.questionText) {
         // Remove the item from the queue
-        await redis.lrem('queue:slack-message-queue:waiting', 1, items[0]);
+        try {
+          await redis.lrem('queue:slack-message-queue:waiting', 1, items[0]);
+          console.log('[WORKER] Successfully removed processed item from queue');
+        } catch (removeError) {
+          console.error('[WORKER] Failed to remove item from queue:', removeError);
+          // Continue anyway
+        }
         
         // Return in the correct format
         return {
@@ -85,106 +117,65 @@ async function getDirectMessageFromRedis(): Promise<{streamId: string, body: Sla
   }
 }
 
-// Send a message to Slack
-async function sendSlackMessage({ channel, text, thread_ts }: { channel: string, text: string, thread_ts?: string }) {
-  console.log(`[SLACK] Sending message to channel ${channel}${thread_ts ? ' in thread ' + thread_ts : ''}`);
+// Handle rate limited Slack API calls with exponential backoff
+async function handleRateLimited(func: () => Promise<any>, initialRetryDelayMs = 1000, maxRetries = 3): Promise<any> {
+  let retryCount = 0;
+  let retryDelayMs = initialRetryDelayMs;
   
-  try {
-    // Make sure we're using the webClient correctly
+  while (retryCount <= maxRetries) {
+    try {
+      return await func();
+    } catch (error: any) {
+      const isRateLimited = error?.code === 'slack_webapi_platform_error' && 
+                            error?.data?.error === 'ratelimited';
+      
+      // If not a rate limit or we've reached max retries, throw
+      if (!isRateLimited || retryCount >= maxRetries) {
+        throw error;
+      }
+      
+      // Get retry delay from Slack or use default with exponential backoff
+      const retryAfter = parseInt(error.headers?.['retry-after'] || '1', 10);
+      const waitTime = Math.max(retryAfter * 1000, retryDelayMs);
+      
+      console.log(`[SLACK_RATE_LIMIT] Rate limited by Slack API. Retry ${retryCount + 1}/${maxRetries} after ${waitTime}ms`);
+      
+      // Wait for the specified time
+      await new Promise(resolve => setTimeout(resolve, waitTime));
+      
+      // Increase delay for next retry
+      retryDelayMs = retryDelayMs * 2;
+      retryCount++;
+    }
+  }
+  
+  throw new Error(`Failed after ${maxRetries} retries due to rate limiting`);
+}
+
+// Updated function to send Slack messages with rate limit handling
+async function sendSlackMessageWithRetry(params: { channel: string, text: string, thread_ts?: string }) {
+  return handleRateLimited(async () => {
     if (!webClient) {
-      console.error('[SLACK] Slack web client is not initialized');
       throw new Error('Slack web client is not initialized');
     }
     
-    // Helper function to format timestamp consistently
-    const formatSlackTimestamp = (timestamp: string): string => {
-      // Skip if undefined/null
-      if (!timestamp) return timestamp;
-      
-      // Already in correct Slack format (seconds.microseconds)
-      if (/^\d+\.\d+$/.test(timestamp)) {
-        return timestamp;
-      }
-      
-      // If it's a millisecond timestamp, convert to Slack format
-      if (/^\d{13,}$/.test(timestamp)) {
-        const seconds = Math.floor(parseInt(timestamp) / 1000);
-        const microseconds = parseInt(timestamp) % 1000 * 1000;
-        return `${seconds}.${microseconds}`;
-      }
-      
-      // If it's already a string but missing decimal (unlikely)
-      if (/^\d+$/.test(timestamp)) {
-        return `${timestamp}.000000`;
-      }
-      
-      console.warn(`[SLACK] Unexpected timestamp format: ${timestamp}`);
-      return timestamp;
-    };
-    
-    // Format thread_ts if provided
-    const formattedThreadTs = thread_ts ? formatSlackTimestamp(thread_ts) : undefined;
-    
-    if (formattedThreadTs !== thread_ts && thread_ts) {
-      console.log(`[SLACK] Reformatted thread_ts from ${thread_ts} to ${formattedThreadTs}`);
-    }
-    
-    // Log entire message before sending
-    console.log(`[SLACK] About to send message: ${JSON.stringify({
-      channel,
-      text: text.substring(0, 50) + (text.length > 50 ? '...' : ''),
-      thread_ts: formattedThreadTs
-    })}`);
-    
-    // Post message to Slack
-    const result = await webClient.chat.postMessage({
-      channel,
-      text,
-      thread_ts: formattedThreadTs,
+    return await webClient.chat.postMessage({
+      ...params,
       unfurl_links: false,
       unfurl_media: false,
     });
-    
-    console.log(`[SLACK] Message sent successfully: ${result.ts}`);
-    return result;
-  } catch (error) {
-    console.error('[SLACK] Error sending message to Slack:', error);
-    
-    // Enhanced error logging
-    if (error instanceof Error) {
-      console.error(`[SLACK] Error type: ${error.name}`);
-      console.error(`[SLACK] Error message: ${error.message}`);
-      console.error(`[SLACK] Error stack: ${error.stack}`);
-      
-      // Special handling for invalid_thread_ts errors
-      if (error.message && error.message.includes('invalid_thread_ts')) {
-        console.error(`[SLACK] This is a thread_ts format error. Used thread_ts: ${thread_ts}`);
-        
-        // Try to send a backup message without thread_ts
-        try {
-          // Check again if webClient is available
-          if (!webClient) {
-            console.error('[SLACK] Cannot send fallback message - Slack web client is not initialized');
-            throw new Error('Slack web client is not initialized');
-          }
-          
-          console.log('[SLACK] Attempting fallback message without thread_ts');
-          const result = await webClient.chat.postMessage({
-            channel,
-            text: "I encountered an error with the message threading. Here's your response as a new message:\n\n" + text,
-            unfurl_links: false,
-            unfurl_media: false,
-          });
-          console.log(`[SLACK] Fallback message sent successfully: ${result.ts}`);
-          return result;
-        } catch (fallbackError) {
-          console.error('[SLACK] Fallback message also failed:', fallbackError);
-        }
-      }
+  });
+}
+
+// Updated function to update Slack messages with rate limit handling
+async function updateSlackMessageWithRetry(params: { channel: string, ts: string, text: string }) {
+  return handleRateLimited(async () => {
+    if (!webClient) {
+      throw new Error('Slack web client is not initialized');
     }
     
-    throw error;
-  }
+    return await webClient.chat.update(params);
+  });
 }
 
 // Process a job from the queue
@@ -216,7 +207,7 @@ async function processJob(job: SlackMessageJob): Promise<boolean> {
           const thread_ts = job.threadTs || job.eventTs;
           console.log(`[WORKER:${jobId}] Using thread_ts: ${thread_ts} for waiting message`);
           
-          await sendSlackMessage({
+          await sendSlackMessageWithRetry({
             channel: job.channelId,
             text: 'I\'m working on your question. This might take a minute...',
             thread_ts: thread_ts
@@ -251,7 +242,7 @@ async function processJob(job: SlackMessageJob): Promise<boolean> {
       console.log(`[WORKER:${jobId}] Using thread_ts: ${thread_ts} for final response`);
       
       // Success - assuming the result is something we can send back
-      await sendSlackMessage({
+      await sendSlackMessageWithRetry({
         channel: job.channelId,
         text: result,
         thread_ts: thread_ts
@@ -274,7 +265,7 @@ async function processJob(job: SlackMessageJob): Promise<boolean> {
       // If we already sent a waiting message, update it to show the error
       // Otherwise send a new error message
       try {
-        await sendSlackMessage({
+        await sendSlackMessageWithRetry({
           channel: job.channelId,
           text: `I'm sorry, I encountered an error while processing your request. Please try again later.`,
           thread_ts: thread_ts
@@ -316,7 +307,7 @@ async function processJobWithStreaming(job: SlackMessageJob): Promise<boolean> {
     // Send the initial thinking message
     let messageResponse;
     try {
-      messageResponse = await sendSlackMessage({
+      messageResponse = await sendSlackMessageWithRetry({
         channel: job.channelId,
         text: "Thinking...",
         thread_ts: thread_ts
@@ -349,7 +340,7 @@ async function processJobWithStreaming(job: SlackMessageJob): Promise<boolean> {
         
         try {
           // Attempt to update the message with new content
-          await webClient!.chat.update({
+          await updateSlackMessageWithRetry({
             channel: job.channelId,
             ts: messageTs,
             text: content
@@ -370,7 +361,7 @@ async function processJobWithStreaming(job: SlackMessageJob): Promise<boolean> {
               
               // Try again after backoff
               try {
-                await webClient!.chat.update({
+                await updateSlackMessageWithRetry({
                   channel: job.channelId,
                   ts: messageTs,
                   text: content
@@ -410,7 +401,7 @@ async function processJobWithStreaming(job: SlackMessageJob): Promise<boolean> {
       if (lastContent && !aborted) {
         try {
           console.log(`[WORKER:${jobId}] Sending final content update (${lastContent.length} chars)`);
-          await webClient!.chat.update({
+          await updateSlackMessageWithRetry({
             channel: job.channelId,
             ts: messageTs,
             text: lastContent
@@ -430,7 +421,7 @@ async function processJobWithStreaming(job: SlackMessageJob): Promise<boolean> {
       // If we have partial content, try to send that with an error note
       if (lastContent) {
         try {
-          await webClient!.chat.update({
+          await updateSlackMessageWithRetry({
             channel: job.channelId,
             ts: messageTs,
             text: lastContent + "\n\n(Note: This response may be incomplete due to an error during processing.)"
@@ -442,7 +433,7 @@ async function processJobWithStreaming(job: SlackMessageJob): Promise<boolean> {
       } else {
         // If we have no content at all, send a generic error message
         try {
-          await webClient!.chat.update({
+          await updateSlackMessageWithRetry({
             channel: job.channelId,
             ts: messageTs,
             text: "I'm sorry, I encountered an error while processing your request. Please try again later."
@@ -640,9 +631,19 @@ async function handleWorkerRequest(request: Request) {
       console.log(`[WORKER:${jobId}] Starting job processing`);
       const useStreaming = message.body.useStreaming !== false; // Default to streaming if not explicitly disabled
       console.log(`[WORKER:${jobId}] Processing mode: ${useStreaming ? 'streaming' : 'standard'}`);
-      const success = useStreaming 
-        ? await processJobWithStreaming(message.body)
-        : await processJob(message.body);
+      
+      let success = false;
+      try {
+        success = useStreaming 
+          ? await processJobWithStreaming(message.body)
+          : await processJob(message.body);
+      } catch (processingError) {
+        console.error(`[WORKER:${jobId}] Critical error in job processing:`, processingError);
+        
+        // Try to notify the user when processing fails
+        await notifyUserOfFailure(message.body, processingError);
+        success = false;
+      }
       
       // Verify the message was processed successfully
       if (success) {
@@ -658,9 +659,27 @@ async function handleWorkerRequest(request: Request) {
         } catch (verifyError) {
           console.error(`[WORKER:${jobId}] Error verifying message:`, verifyError);
         }
+      } else {
+        console.error(`[WORKER:${jobId}] Failed to process message`);
+        
+        // Try to notify the user if we didn't already
+        try {
+          await notifyUserOfFailure(message.body, new Error("Processing failed"));
+        } catch (notifyError) {
+          console.error(`[WORKER:${jobId}] Failed to notify user of processing failure:`, notifyError);
+        }
       }
       
-      return NextResponse.json({
+      // Check if there are more jobs in the queue
+      const remainingJobs = await hasMoreJobs();
+      console.log(`[WORKER] Remaining jobs in queue: ${remainingJobs}`);
+      
+      // Chain worker execution if there are more jobs
+      if (remainingJobs > 0) {
+        // ... existing chaining code ...
+      }
+      
+      return NextResponse.json({ 
         status: success ? 'success' : 'error',
         action: 'job_processing',
         jobId: jobId

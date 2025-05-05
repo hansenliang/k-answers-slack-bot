@@ -346,4 +346,39 @@ async function performRagQuery(text: string): Promise<string> {
   console.log(`[RAG_QUERY] Total RAG process completed in ${Date.now() - startTime}ms`);
 
   return answer;
+}
+
+// Function to safely query RAG system with added error handling
+export async function safeQueryRag(question: string, maxAttempts = 2): Promise<string> {
+  let attempts = 0;
+  let lastError: any = null;
+  
+  while (attempts < maxAttempts) {
+    attempts++;
+    try {
+      console.log(`[SAFE_RAG] Attempt ${attempts} to query RAG for: "${question.substring(0, 30)}..."`);
+      const result = await queryRag(question);
+      return result;
+    } catch (error) {
+      console.error(`[SAFE_RAG] Error in attempt ${attempts}:`, error);
+      lastError = error;
+      
+      // Wait a bit before retrying
+      if (attempts < maxAttempts) {
+        await new Promise(resolve => setTimeout(resolve, 1000));
+      }
+    }
+  }
+  
+  // If all attempts failed, return a fallback response
+  console.error(`[SAFE_RAG] All ${maxAttempts} attempts failed for: "${question.substring(0, 30)}..."`);
+  
+  return `I apologize, but I encountered a technical issue while processing your question: "${question}".
+
+If this is urgent, please try:
+1. Asking your question again
+2. Rephrasing your question to be more specific
+3. Breaking your question into smaller, focused questions
+
+Error details: ${lastError ? (lastError.message || 'Unknown error') : 'Unknown error'}`;
 } 

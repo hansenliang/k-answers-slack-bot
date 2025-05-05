@@ -4,6 +4,7 @@ import { timingSafeEqual, createHmac } from 'crypto';
 import { enqueueSlackMessage } from '@/lib/jobQueue';
 import { SLACK_BOT_TOKEN, SLACK_SIGNING_SECRET, validateSlackEnvironment, logEnvironmentStatus } from '@/lib/env';
 import { Redis } from '@upstash/redis';
+import { queryRag, safeQueryRag } from '@/lib/rag';
 
 // Set runtime to nodejs to support Node.js built-in modules
 export const runtime = 'nodejs';
@@ -189,60 +190,122 @@ async function processSlackMessage(event: any, isAppMention = false, requestUrl?
     // Set expiry for the event key (5 minutes)
     await redis.expire(eventKey, 300);
 
-    // Enqueue the Slack message for processing
+    // Try to enqueue the Slack message for processing first
     console.log(`[PROCESS:${processingId}] Enqueueing message for processing`);
-    await enqueueSlackMessage({
-      channelId,
-      userId,
-      questionText,
-      threadTs: event.thread_ts ?? event.ts,
-      eventTs: event.ts,
-      useStreaming: false
-    });
+    let enqueueSuccess = false;
     
-    // Fire-and-forget trigger so the first job is processed immediately
     try {
-      // Use a hardcoded production domain if in production, otherwise use the request URL
-      const baseUrl = process.env.VERCEL_ENV === 'production' 
-        ? 'https://k-answers-bot.vercel.app' 
-        : requestUrl 
-          ? new URL(requestUrl).origin 
-          : process.env.VERCEL_URL 
-            ? `https://${process.env.VERCEL_URL}` 
-            : 'http://localhost:3000';
+      // Attempt to enqueue but catch errors
+      await enqueueSlackMessage({
+        channelId,
+        userId,
+        questionText,
+        threadTs: event.thread_ts ?? event.ts,
+        eventTs: event.ts,
+        useStreaming: false
+      });
       
-      // IMPORTANT: Use WORKER_SECRET_KEY which is what the worker endpoint checks for
-      const workerSecret = process.env.WORKER_SECRET_KEY || '';
-      
-      if (!workerSecret) {
-        console.warn(`[PROCESS:${processingId}] WORKER_SECRET_KEY environment variable is not set`);
+      // Fire-and-forget trigger so the first job is processed immediately
+      try {
+        // Use a hardcoded production domain if in production, otherwise use the request URL
+        const baseUrl = process.env.VERCEL_ENV === 'production' 
+          ? 'https://k-answers-bot.vercel.app' 
+          : requestUrl 
+            ? new URL(requestUrl).origin 
+            : process.env.VERCEL_URL 
+              ? `https://${process.env.VERCEL_URL}` 
+              : 'http://localhost:3000';
+        
+        // IMPORTANT: Use WORKER_SECRET_KEY which is what the worker endpoint checks for
+        const workerSecret = process.env.WORKER_SECRET_KEY || '';
+        
+        if (!workerSecret) {
+          console.warn(`[PROCESS:${processingId}] WORKER_SECRET_KEY environment variable is not set`);
+        }
+        
+        console.log(`[PROCESS:${processingId}] Triggering worker at ${baseUrl}/api/slack/rag-worker`);
+        
+        // Don't await the fetch - fire and forget
+        fetch(`${baseUrl}/api/slack/rag-worker?key=${workerSecret}`, { 
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Trigger-Source': 'slack_events'
+          }
+        })
+        .then(response => {
+          if (!response.ok) {
+            console.error(`[PROCESS:${processingId}] Worker trigger failed with status ${response.status}`);
+            return response.text().then(text => {
+              console.error(`[PROCESS:${processingId}] Worker error response: ${text}`);
+            });
+          } else {
+            console.log(`[PROCESS:${processingId}] Worker successfully triggered with status ${response.status}`);
+            enqueueSuccess = true;
+          }
+        })
+        .catch(error => {
+          console.error(`[PROCESS:${processingId}] Error triggering worker:`, error);
+        });
+      } catch (triggerError) {
+        console.error(`[PROCESS:${processingId}] Error triggering worker (non-blocking):`, triggerError);
       }
       
-      console.log(`[PROCESS:${processingId}] Triggering worker at ${baseUrl}/api/slack/rag-worker`);
-      
-      // Don't await the fetch - fire and forget
-      fetch(`${baseUrl}/api/slack/rag-worker?key=${workerSecret}`, { 
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'X-Trigger-Source': 'slack_events'
-        }
-      })
-      .then(response => {
-        if (!response.ok) {
-          console.error(`[PROCESS:${processingId}] Worker trigger failed with status ${response.status}`);
-          return response.text().then(text => {
-            console.error(`[PROCESS:${processingId}] Worker error response: ${text}`);
-          });
+      // Check if the redis queue is actually increasing (as a secondary check)
+      try {
+        const queueLen = await redis.llen('queue:slack-message-queue:waiting');
+        if (queueLen > 0) {
+          console.log(`[PROCESS:${processingId}] Verified queue size is now ${queueLen}`);
+          enqueueSuccess = true;
         } else {
-          console.log(`[PROCESS:${processingId}] Worker successfully triggered with status ${response.status}`);
+          console.warn(`[PROCESS:${processingId}] Queue appears empty after enqueue, may need to process directly`);
         }
-      })
-      .catch(error => {
-        console.error(`[PROCESS:${processingId}] Error triggering worker:`, error);
-      });
-    } catch (triggerError) {
-      console.error(`[PROCESS:${processingId}] Error triggering worker (non-blocking):`, triggerError);
+      } catch (redisError) {
+        console.error(`[PROCESS:${processingId}] Error checking Redis queue:`, redisError);
+      }
+    } catch (enqueueError) {
+      console.error(`[PROCESS:${processingId}] Error enqueueing message:`, enqueueError);
+    }
+    
+    // If enqueueing or worker triggering failed, process directly as fallback
+    if (!enqueueSuccess) {
+      console.log(`[PROCESS:${processingId}] Queue process failed, falling back to direct processing`);
+      
+      try {
+        // Send a "thinking" message first
+        await webClient.chat.postMessage({
+          channel: channelId,
+          thread_ts: threadTs,
+          text: "I'm thinking about this question... (processing directly)"
+        });
+        
+        // Process the question directly using the safer function with retries
+        const answer = await safeQueryRag(questionText, 2);
+        
+        // Send the answer back to the user
+        await webClient.chat.postMessage({
+          channel: channelId,
+          thread_ts: threadTs,
+          text: answer
+        });
+        
+        console.log(`[PROCESS:${processingId}] Successfully processed question directly`);
+      } catch (directProcessError) {
+        console.error(`[PROCESS:${processingId}] Error in direct processing:`, directProcessError);
+        
+        // Notify the user of the error
+        try {
+          await webClient.chat.postMessage({
+            channel: channelId,
+            thread_ts: threadTs,
+            text: "I'm sorry, I encountered an error while processing your request. Please try again later."
+          });
+        } catch (notifyError) {
+          console.error(`[PROCESS:${processingId}] Failed to send error notification:`, notifyError);
+        }
+        
+        return false;
+      }
     }
     
     return true;
@@ -294,21 +357,25 @@ export async function POST(request: Request) {
       // CRITICAL: Create response immediately to acknowledge receipt
       const response = NextResponse.json({ ok: true });
       
-      // Enqueue the event asynchronously after responding - no setTimeout needed
-      if (body.event.type === 'app_mention' || body.event.type === 'message') {
+      // Only process app_mention or message events, and only when in channels
+      if ((body.event.type === 'app_mention' || body.event.type === 'message') && 
+          body.event.channel && !body.event.channel.startsWith('D')) { // Skip DMs for now
         const isAppMention = body.event.type === 'app_mention';
         console.log(`[SLACK_POST] Starting async processing for ${isAppMention ? 'app_mention' : 'message'}`);
         
         // Fire and forget - don't await the result to avoid blocking the response
-        processSlackMessage(body.event, isAppMention, request.url)
-          .catch(error => console.error(`[SLACK_POST] Async error in ${isAppMention ? 'app_mention' : 'message'} handler:`, error));
+        // Use a setTimeout to ensure this runs after response is sent
+        setTimeout(() => {
+          processSlackMessage(body.event, isAppMention, request.url)
+            .catch(error => console.error(`[SLACK_POST] Async error in ${isAppMention ? 'app_mention' : 'message'} handler:`, error));
+        }, 10);
       } else {
         console.log(`[SLACK_POST] Ignoring unsupported event type: ${body.event.type}`);
       }
       
       // Immediately respond to Slack to acknowledge receipt
       console.log('[SLACK_POST] Sending acknowledge response to Slack');
-      return response; // CRITICAL FIX: Return the response object
+      return response; // Return the response object
     }
     
     // Handle other event types or return an error
@@ -323,6 +390,7 @@ export async function POST(request: Request) {
         stack: error.stack
       });
     }
+    // Always return a response even if there's an error
     return NextResponse.json({ error: 'Internal server error' }, { status: 500 });
   }
 }
