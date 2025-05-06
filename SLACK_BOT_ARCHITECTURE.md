@@ -24,12 +24,9 @@ Slack → /api/slack/events (Edge Function, <3s) → QStash → /api/slack/worke
 
 3. **QStash Message Queue**
    - Reliable message delivery between events API and worker
-   - Automatic retries (up to 3 times)
+   - Automatic retries (up to 3 times with exponential backoff)
    - First 5K deliveries per month free
-
-4. **Cron Job Backup**
-   - Runs every 15 minutes
-   - Ensures queue is drained even during traffic lulls
+   - Push-based delivery ensures immediate processing
 
 ## Implementation Details
 
@@ -50,6 +47,7 @@ The worker endpoint:
 - Implements message streaming for partial updates
 - Handles Slack rate limits with a simple retry mechanism
 - Updates the "thinking" message or sends a new response
+- Implements idempotent processing for safe repeated deliveries
 
 ### 3. Streaming Support
 
@@ -62,7 +60,7 @@ For long-running queries:
 ### 4. Rate Limit Handling
 
 Implementation includes:
-- Retry on rate limit errors with 1s backoff
+- Retry on rate limit errors with 1.1s backoff
 - Proper handling of Slack's rate limit headers
 - Optimized to stay within 1 message/second per channel limit
 
@@ -72,6 +70,7 @@ Implementation includes:
    - Immediate acknowledgment to Slack (<3s)
    - Message persistence via QStash
    - Retry mechanisms at multiple levels
+   - QStash's built-in retry for transient failures
 
 2. **Free Tier Compatible**
    - Vercel Hobby: Stays within 10s serverless function limit

@@ -131,6 +131,23 @@ async function processWithStreaming(
   }
 }
 
+// Simple idempotency helper using the event timestamp
+// This prevents duplicate processing if QStash delivers the same job multiple times
+const processedJobs = new Map<string, number>();
+const PROCESSED_EXPIRY_MS = 60 * 60 * 1000; // Keep entries for 1 hour
+
+// Periodically clean up old entries to prevent memory leaks
+setInterval(() => {
+  const cutoffTime = Date.now() - PROCESSED_EXPIRY_MS;
+  const expiredIds = [];
+  for (const [jobId, timestamp] of processedJobs.entries()) {
+    if (timestamp && typeof timestamp === 'number' && timestamp < cutoffTime) {
+      expiredIds.push(jobId);
+    }
+  }
+  expiredIds.forEach(id => processedJobs.delete(id));
+}, 15 * 60 * 1000); // Run cleanup every 15 minutes
+
 export async function POST(request: Request) {
   console.log('[WORKER] Worker received request');
   
@@ -147,22 +164,46 @@ export async function POST(request: Request) {
       stub_ts, 
       channel_type,
       response_url, // Support for response_url from slash commands
-      useStreaming = false // Default to non-streaming mode
+      useStreaming = false, // Default to non-streaming mode
+      eventTs // Used for idempotency check
     } = job;
     
-    // Check if we're processing a draining request
+    // Check for diagnostic/health requests
     const url = new URL(request.url);
-    const isDrain = url.searchParams.get('drain') === '1';
+    const isDiagnostic = url.searchParams.get('diagnostic') === '1' || 
+                          url.searchParams.get('health') === '1' ||
+                          url.searchParams.get('drain') === '1';
     
-    if (isDrain) {
-      console.log('[WORKER] Processing drain request - queue cleanup');
-      return NextResponse.json({ status: 'drain_processed' });
+    if (isDiagnostic) {
+      console.log('[WORKER] Processing diagnostic/health request');
+      return NextResponse.json({ 
+        status: 'healthy',
+        mode: 'diagnostic',
+        message: 'Worker endpoint is functioning correctly' 
+      });
     }
     
     // Validate required fields - at minimum we need questionText and either channelId or response_url
     if (!questionText || (!channelId && !response_url)) {
       console.error('[WORKER] Missing required job fields');
       return NextResponse.json({ error: 'Missing required fields' }, { status: 400 });
+    }
+    
+    // Check idempotency - avoid processing the same message twice
+    // This is important when QStash delivers a message multiple times
+    if (eventTs) {
+      const jobId = `${threadTs || channelId}-${eventTs}`;
+      if (processedJobs.has(jobId)) {
+        console.log(`[WORKER] Skipping already processed job: ${jobId}`);
+        return NextResponse.json({ 
+          status: 'skipped', 
+          message: 'Job already processed', 
+          jobId 
+        });
+      }
+
+      // Mark this job as being processed
+      processedJobs.set(jobId, Date.now());
     }
     
     // Only use streaming if explicitly enabled via environment variable
