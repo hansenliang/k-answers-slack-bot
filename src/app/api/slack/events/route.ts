@@ -1,10 +1,9 @@
 import { NextResponse } from 'next/server';
 import { WebClient } from '@slack/web-api';
 import { timingSafeEqual, createHmac } from 'crypto';
-import { queryRag } from '@/lib/rag';
 
-// Set runtime to nodejs to support Node.js built-in modules
-export const runtime = 'nodejs';
+// Set runtime to edge for faster response
+export const runtime = 'edge';
 
 // Initialize Slack client
 const token = process.env.SLACK_BOT_TOKEN;
@@ -14,7 +13,7 @@ const SLACK_SIGNING_SECRET = process.env.SLACK_SIGNING_SECRET || '';
 // Helper function to retry Slack API calls with exponential backoff
 async function callSlackWithRetry<T>(
   apiCall: () => Promise<T>,
-  maxRetries = 3,
+  maxRetries = 1, // Reducing this to 1 retry to ensure we stay under the 3s limit
   initialDelayMs = 200
 ): Promise<T> {
   let lastError: any;
@@ -36,15 +35,12 @@ async function callSlackWithRetry<T>(
         break;
       }
       
-      // Calculate delay with exponential backoff and jitter
-      const delay = initialDelayMs * Math.pow(2, attempt) * (0.8 + Math.random() * 0.4);
-      
-      // Use rate limit header if available
+      // Simple backoff for edge function
       if (isRateLimit && error?.headers?.['retry-after']) {
         const retryAfter = parseInt(error.headers['retry-after'], 10) * 1000;
-        await new Promise(resolve => setTimeout(resolve, retryAfter));
+        await new Promise(resolve => setTimeout(resolve, Math.min(retryAfter, 500))); // Cap at 500ms to stay under 3s
       } else {
-        await new Promise(resolve => setTimeout(resolve, delay));
+        await new Promise(resolve => setTimeout(resolve, initialDelayMs));
       }
     }
   }
@@ -57,16 +53,6 @@ async function callSlackWithRetry<T>(
 const processedEvents = new Map<string, number>();
 const EVENT_EXPIRATION_MS = 30 * 60 * 1000; // 30 minutes
 
-// Clean up expired events periodically
-setInterval(() => {
-  const now = Date.now();
-  for (const [eventId, timestamp] of processedEvents.entries()) {
-    if (now - timestamp > EVENT_EXPIRATION_MS) {
-      processedEvents.delete(eventId);
-    }
-  }
-}, 5 * 60 * 1000); // Clean up every 5 minutes
-
 // Check if an event has already been processed
 function isEventProcessed(eventId: string): boolean {
   return processedEvents.has(eventId);
@@ -75,30 +61,13 @@ function isEventProcessed(eventId: string): boolean {
 // Mark an event as processed
 function markEventProcessed(eventId: string): void {
   processedEvents.set(eventId, Date.now());
-}
-
-// Cache for bot ID to avoid repeated API calls
-let botUserIdCache: string | null = null;
-
-// Get bot user ID (with caching)
-async function getBotUserId(): Promise<string> {
-  console.log('[SLACK] Getting bot user ID');
-  if (botUserIdCache) {
-    return botUserIdCache;
-  }
-
-  try {
-    if (!webClient) {
-      throw new Error('Slack client not initialized');
+  
+  // Clean up old entries inline (simpler for edge function)
+  const now = Date.now();
+  for (const [eventId, timestamp] of processedEvents.entries()) {
+    if (now - timestamp > EVENT_EXPIRATION_MS) {
+      processedEvents.delete(eventId);
     }
-    
-    const botInfo = await webClient.auth.test();
-    botUserIdCache = botInfo.user_id as string;
-    console.log(`[SLACK] Got and cached bot ID: ${botUserIdCache}`);
-    return botUserIdCache;
-  } catch (error) {
-    console.error('[SLACK] Failed to get bot ID:', error);
-    throw error;
   }
 }
 
@@ -130,30 +99,7 @@ function verifySlackRequest(
   }
 }
 
-// Rate limiting - simple in-memory implementation (resets on server restart)
-const userRequests = new Map<string, { count: number, resetTime: number }>();
-const MAX_REQUESTS_PER_MINUTE = 5;
-
-function checkRateLimit(userId: string): boolean {
-  const now = Date.now();
-  const userRecord = userRequests.get(userId);
-  
-  // Reset counter if time window has passed
-  if (!userRecord || userRecord.resetTime < now) {
-    userRequests.set(userId, { count: 1, resetTime: now + 60000 }); // 1 minute
-    return true;
-  }
-  
-  // Increment counter if within time window
-  if (userRecord.count < MAX_REQUESTS_PER_MINUTE) {
-    userRecord.count++;
-    return true;
-  }
-  
-  return false;
-}
-
-// Process Slack message directly
+// Function to send the "thinking" message and process event
 async function processMessage(event: any, isAppMention = false): Promise<void> {
   // Skip bot messages to prevent loops
   if (!event || event.bot_id || event.subtype === 'bot_message') {
@@ -172,7 +118,6 @@ async function processMessage(event: any, isAppMention = false): Promise<void> {
   
   // Handle threading properly - if this is a threaded message, reply in the same thread
   const threadTs = event.thread_ts || event.ts;
-  const isThreadedReply = !!event.thread_ts;
   
   // Check if Slack client is available
   if (!webClient) {
@@ -184,9 +129,14 @@ async function processMessage(event: any, isAppMention = false): Promise<void> {
   let questionText = '';
   try {
     if (isAppMention) {
-      const botUserId = await getBotUserId();
-      const mentionTag = `<@${botUserId}>`;
-      questionText = event.text.replace(mentionTag, '').trim();
+      // For app mentions, extract the text (removing the mention)
+      const botUserId = event.text.match(/<@([A-Z0-9]+)>/)?.[1];
+      if (botUserId) {
+        const mentionTag = `<@${botUserId}>`;
+        questionText = event.text.replace(mentionTag, '').trim();
+      } else {
+        questionText = event.text.trim();
+      }
     } else {
       questionText = event.text.trim();
     }
@@ -195,106 +145,63 @@ async function processMessage(event: any, isAppMention = false): Promise<void> {
       console.log('[SLACK] Empty question after processing, skipping');
       return;
     }
-    
-    console.log(`[SLACK] Processing message: "${questionText.substring(0, 30)}..."${isThreadedReply ? ' (thread reply)' : ''}`);
   } catch (error) {
     console.error('[SLACK] Error extracting question text:', error);
     return;
   }
   
-  // Check rate limit
-  if (!checkRateLimit(userId)) {
+  try {
+    // Send "thinking" message first to acknowledge within 3-second window
+    let stubTS: string | undefined;
     try {
-      await webClient.chat.postMessage({
+      const thinkingResponse = await callSlackWithRetry(() => webClient!.chat.postMessage({
         channel: channelId,
         thread_ts: threadTs,
-        text: "You've hit your rate limit (5 questions/min). Please wait a moment and try again."
-      });
-    } catch (rateLimitError) {
-      console.error('[SLACK] Error sending rate limit message:', rateLimitError);
-    }
-    return;
-  }
-  
-  // Unique ID for tracking this request in logs
-  const requestId = `${userId.substring(0, 6)}-${Date.now().toString(36)}`;
-  
-  // Send "thinking" message first to acknowledge within 3-second window
-  let thinkingMsgTs: string | undefined;
-  try {
-    const thinkingResponse = await webClient.chat.postMessage({
-      channel: channelId,
-      thread_ts: threadTs,
-      text: "I'm thinking about your question... (This may take a moment)"
-    });
-    thinkingMsgTs = thinkingResponse.ts as string;
-    console.log(`[SLACK:${requestId}] Sent thinking message, ts: ${thinkingMsgTs}`);
-  } catch (error) {
-    console.error(`[SLACK:${requestId}] Error sending thinking message:`, error);
-    // Continue processing even if acknowledgment fails
-  }
-  
-  try {
-    // Process the query directly - no queueing
-    console.log(`[SLACK:${requestId}] Calling RAG with question: "${questionText.substring(0, 30)}..."`);
-    const startTime = Date.now();
-    const answer = await queryRag(questionText);
-    const processingTime = Date.now() - startTime;
-    console.log(`[SLACK:${requestId}] RAG processing completed in ${processingTime}ms`);
-    
-    // If we got a thinking message, update it instead of sending a new message
-    if (thinkingMsgTs) {
-      try {
-        await webClient.chat.update({
-          channel: channelId,
-          ts: thinkingMsgTs,
-          text: answer
-        });
-        console.log(`[SLACK:${requestId}] Updated thinking message with answer`);
-        return;
-      } catch (updateError) {
-        console.error(`[SLACK:${requestId}] Failed to update thinking message:`, updateError);
-        // Fall back to sending a new message
-      }
+        text: "I'm searching the docs..." // Updated wording
+      }));
+      stubTS = thinkingResponse.ts as string;
+    } catch (error) {
+      console.error('[SLACK] Error sending thinking message:', error);
+      // Continue without the thinking message
     }
     
-    // Send a new response if updating failed or we didn't send a thinking message
-    await webClient.chat.postMessage({
-      channel: channelId,
-      thread_ts: threadTs,
-      text: answer
+    // Prepare event payload for worker
+    const workerPayload = {
+      userId,
+      channelId,
+      threadTs,
+      eventTs: ts,
+      questionText,
+      stub_ts: stubTS,
+      channel_type: event.channel_type,
+      isAppMention,
+      // Include response_url if available (for slash commands)
+      response_url: event.response_url
+    };
+    
+    // Use edge-compatible fetch for QStash instead of the Node client
+    const res = await fetch("https://qstash.upstash.io/v1/publish", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${process.env.QSTASH_TOKEN}`,
+        "Content-Type": "application/json",
+        "Upstash-Forward-Url": process.env.RAG_WORKER_URL!,
+      },
+      body: JSON.stringify(workerPayload),
     });
     
-    console.log(`[SLACK:${requestId}] Successfully sent response`);
-  } catch (error) {
-    console.error(`[SLACK:${requestId}] Error processing message:`, error);
-    
-    // Notify user of error
-    try {
-      // If we have a thinking message, update it instead of sending a new one
-      if (thinkingMsgTs) {
-        await webClient.chat.update({
-          channel: channelId,
-          ts: thinkingMsgTs,
-          text: "I'm sorry, I encountered an error while processing your request. Please try again later."
-        });
-      } else {
-        await webClient.chat.postMessage({
-          channel: channelId,
-          thread_ts: threadTs,
-          text: "I'm sorry, I encountered an error while processing your request. Please try again later."
-        });
-      }
-    } catch (notifyError) {
-      console.error(`[SLACK:${requestId}] Error sending error notification:`, notifyError);
+    if (!res.ok) {
+      console.error("QStash publish failed", await res.text());
+    } else {
+      console.log('[SLACK] Successfully queued message for processing');
     }
+  } catch (error) {
+    console.error('[SLACK] Error enqueueing message:', error);
   }
 }
 
 // Main request handler
 export async function POST(request: Request) {
-  console.log('[SLACK] Received Slack API request');
-  
   try {
     // Get the raw request body
     const rawBody = await request.text();
@@ -302,7 +209,6 @@ export async function POST(request: Request) {
     
     try {
       body = JSON.parse(rawBody);
-      console.log('[SLACK] Parsed request body', { type: body.type });
     } catch (err) {
       console.error('[SLACK] Failed to parse request body:', err);
       return NextResponse.json({ error: 'Invalid request body' }, { status: 400 });
@@ -310,11 +216,10 @@ export async function POST(request: Request) {
 
     // Handle URL verification challenge immediately
     if (body.type === 'url_verification') {
-      console.log('[SLACK] Handling URL verification challenge');
       return NextResponse.json({ challenge: body.challenge });
     }
 
-    // Verify the request signature (except for URL verification)
+    // Verify the request signature
     const signature = request.headers.get('x-slack-signature');
     const timestamp = request.headers.get('x-slack-request-timestamp');
     
@@ -344,19 +249,52 @@ export async function POST(request: Request) {
       // Mark this event as processed
       markEventProcessed(eventId);
       
-      // Only process app_mention or message events in channels (not DMs)
-      if ((body.event.type === 'app_mention' || body.event.type === 'message') && 
-          body.event.channel && !body.event.channel.startsWith('D')) {
+      // Process app_mention or message events (including DMs now)
+      if (body.event.type === 'app_mention' || body.event.type === 'message') {
         const isAppMention = body.event.type === 'app_mention';
         
-        // Process the message asynchronously after responding
-        setTimeout(() => {
-          processMessage(body.event, isAppMention)
-            .catch(error => console.error('[SLACK] Async processing error:', error));
-        }, 10);
+        // Start processing but don't await
+        processMessage(body.event, isAppMention)
+          .catch(error => console.error('[SLACK] Async processing error:', error));
       }
       
       // Immediately respond to Slack
+      return response;
+    }
+    
+    // Handle slash commands directly
+    if (body.command) {
+      // Acknowledge immediately for slash commands
+      const response = NextResponse.json({ response_type: "in_channel", text: "I'm searching the docs..." });
+      
+      // Process the slash command asynchronously
+      const payload = {
+        userId: body.user_id,
+        channelId: body.channel_id,
+        response_url: body.response_url, // Slash commands provide a response_url
+        questionText: body.text,
+        command: body.command
+      };
+      
+      // Queue up the job using QStash
+      try {
+        const res = await fetch("https://qstash.upstash.io/v1/publish", {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${process.env.QSTASH_TOKEN}`,
+            "Content-Type": "application/json",
+            "Upstash-Forward-Url": process.env.RAG_WORKER_URL!,
+          },
+          body: JSON.stringify(payload),
+        });
+        
+        if (!res.ok) {
+          console.error("QStash publish failed for slash command", await res.text());
+        }
+      } catch (error) {
+        console.error('[SLACK] Error enqueueing slash command:', error);
+      }
+      
       return response;
     }
     

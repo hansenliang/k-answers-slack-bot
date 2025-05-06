@@ -8,7 +8,8 @@
     "start": "next start",
     "lint": "next lint",
     "test": "jest",
-    "test:watch": "jest --watch"
+    "test:watch": "jest --watch",
+    "test:e2e": "node scripts/test-slack-e2e.js"
   },
   "dependencies": {
     "@auth/core": "^0.34.2",
@@ -19,6 +20,7 @@
     "@radix-ui/react-slot": "^1.2.0",
     "@slack/bolt": "^3.17.1",
     "@slack/web-api": "^7.0.1",
+    "@upstash/qstash": "^2.7.23",
     "@upstash/queue": "^1.0.1",
     "@upstash/redis": "^1.34.8",
     "class-variance-authority": "^0.7.1",
