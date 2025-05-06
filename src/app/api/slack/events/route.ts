@@ -252,6 +252,14 @@ async function processMessage(event: any, isAppMention = false): Promise<void> {
     } else {
       console.log('[SLACK] Successfully queued message for processing');
     }
+    
+    // Add detailed logging for QStash publish response
+    console.log(
+      "[SLACK] QStash publish",
+      res.status,
+      await res.text().catch(() => "no body")
+    );
+    
   } catch (error) {
     console.error('[SLACK] Error enqueueing message:', error);
   }

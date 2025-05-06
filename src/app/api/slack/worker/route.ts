@@ -168,6 +168,14 @@ export async function POST(request: Request) {
       eventTs // Used for idempotency check
     } = job;
     
+    // Log job details for debugging
+    console.log("[WORKER] Job received", {
+      channelId,
+      stub_ts,
+      threadTs,
+      text_len: questionText?.length
+    });
+    
     // Check for diagnostic/health requests
     const url = new URL(request.url);
     const isDiagnostic = url.searchParams.get('diagnostic') === '1' || 
@@ -230,7 +238,7 @@ export async function POST(request: Request) {
       
       // If we have response_url and no bot token, use response_url
       if (response_url && !webClient) {
-        console.log('[WORKER] Using response_url to respond');
+        console.log('[WORKER] About to send answer via response_url');
         const res = await fetch(response_url, {
           method: "POST",
           headers: {
@@ -239,8 +247,11 @@ export async function POST(request: Request) {
           body: JSON.stringify({ text: answer })
         });
         
+        const responseText = await res.text().catch(() => "no body");
+        console.log('[WORKER] Response URL fetch result:', { status: res.status, body: responseText });
+        
         if (!res.ok) {
-          console.error('[WORKER] Failed to send response via response_url:', await res.text());
+          console.error('[WORKER] Failed to send response via response_url:', responseText);
           return NextResponse.json({ status: 'error', error: 'Failed to send response' }, { status: 500 });
         }
         
@@ -255,11 +266,13 @@ export async function POST(request: Request) {
       
       // If we have a stub message, update it
       if (stub_ts && channelId) {
-        await slackCall(webClient.chat.update, {
+        console.log('[WORKER] About to send answer via chat.update', { stub_ts });
+        const updateResult = await slackCall(webClient.chat.update, {
           channel: channelId,
           ts: stub_ts,
           text: answer
         });
+        console.log('[WORKER] Slack API update response:', updateResult);
         console.log('[WORKER] Updated thinking message with answer');
       } else if (channelId) {
         // Otherwise, send a new message
@@ -274,7 +287,9 @@ export async function POST(request: Request) {
           messageParams.thread_ts = threadTs;
         }
         
-        await slackCall(webClient.chat.postMessage, messageParams);
+        console.log('[WORKER] About to send answer via new message', { channelId, hasThreadTs: !!threadTs });
+        const postResult = await slackCall(webClient.chat.postMessage, messageParams);
+        console.log('[WORKER] Slack API postMessage response:', postResult);
         console.log('[WORKER] Sent new message with answer');
       }
       
@@ -284,15 +299,18 @@ export async function POST(request: Request) {
       
       // User-visible error fallback
       if (stub_ts && channelId && webClient) {
-        await slackCall(webClient.chat.update, {
+        console.log('[WORKER] About to update message with error notification', { stub_ts });
+        const errorResult = await slackCall(webClient.chat.update, {
           channel: channelId,
           ts: stub_ts,
           text: "⚠️ Sorry, I hit an error tracking down the docs. Please try again."
         });
+        console.log('[WORKER] Error notification update result:', errorResult);
       } else if (response_url) {
         // Try using response_url as fallback
         try {
-          await fetch(response_url, {
+          console.log('[WORKER] About to send error via response_url');
+          const errorRes = await fetch(response_url, {
             method: "POST",
             headers: {
               "Content-Type": "application/json"
@@ -300,6 +318,12 @@ export async function POST(request: Request) {
             body: JSON.stringify({ 
               text: "⚠️ Sorry, I hit an error tracking down the docs. Please try again." 
             })
+          });
+          
+          console.log('[WORKER] Error response_url result:', { 
+            status: errorRes.status, 
+            ok: errorRes.ok,
+            body: await errorRes.text().catch(() => "no body")
           });
         } catch (responseUrlError) {
           console.error('[WORKER] Failed to send error via response_url:', responseUrlError);
